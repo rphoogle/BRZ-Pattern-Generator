@@ -11,9 +11,9 @@ fn main() {
                     for &turn in &[Turn::WallsUpright, Turn::WallsAcross] {
                         for &cell in &[10, 20, 30, 40] {
                             for &flip in &[false, true] {
-                                for &(top, posts) in &[(false, 0), (true, 0), (false, 2), (true, 4)] {
+                                for &(top, posts, round, through, extra) in &[(false, 0, false, true, 0), (true, 0, false, true, 0), (false, 2, true, true, 4), (true, 4, false, false, -2), (false, 4, true, true, 0)] {
                                     let s = Settings {
-                                        style, spokes, area, way_up, turn, cell, flip_wedges: flip, spoke_top: top, corner_posts: posts, best_bearings: cell == 20 && flip,
+                                        style, spokes, area, way_up, turn, cell, flip_wedges: flip, spoke_top: top, corner_posts: posts, posts_round: round, walls_through: through, posts_extra: extra, best_bearings: cell == 20 && flip,
                                         width: cell * 8, length: cell * 6,
                                         ..Settings::default()
                                     };

@@ -19,6 +19,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BEARING: &str = "B_Joint_RigidBearing_Micro";
 pub const MICRO_BRICK: &str = "PB_DefaultMicroBrick";
 pub const MICRO_WEDGE: &str = "PB_DefaultMicroWedge";
+pub const POLE: &str = "PB_DefaultPole";
 
 pub const MATERIALS: [(&str, &str); 6] = [
     ("Plastic", "BMC_Plastic"),
@@ -74,6 +75,12 @@ pub struct Settings {
     pub way_up: WayUp,
     /// Corner posts: width in units (0 = off). Walls are shortened to end at the posts.
     pub corner_posts: i32,
+    /// Round pillars (pole bricks) instead of square ones.
+    pub posts_round: bool,
+    /// Entity walls keep their full length and run through the pillars.
+    pub walls_through: bool,
+    /// Pillars taller (+) or shorter (-) than the walls, in units.
+    pub posts_extra: i32,
     /// Try many bearing spots and keep the one whose rounding makes corners meet best.
     pub best_bearings: bool,
     pub color: [u8; 3],
@@ -107,6 +114,9 @@ impl Default for Settings {
             length: 400,
             way_up: WayUp::Upright,
             corner_posts: 0,
+            posts_round: false,
+            walls_through: true,
+            posts_extra: 0,
             best_bearings: true,
             color: [0xDB, 0xBE, 0xC0],
             material: 0,
@@ -115,10 +125,13 @@ impl Default for Settings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind { Micro, Wedge, Pole }
+
 /// One brick before it is placed in a grid: size, local position, orientation byte.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct B {
-    pub wedge: bool,
+    pub kind: Kind,
     pub size: (i32, i32, i32),
     pub pos: (i32, i32, i32),
     /// direction * 4 + rotation (as in the save file).
@@ -202,11 +215,11 @@ fn wall(s: &Settings, cx: i32, cy: i32, zb: i32, lh: i32, plus: bool, out: &mut 
     match s.style {
         WallStyle::MicroWedge => {
             let (a, b) = if plus { ((cx + 1, 8u8), (cx - 1, 11u8)) } else { ((cx - 1, 12u8), (cx + 1, 15u8)) };
-            out.push(B { wedge: true, size: (hh, 1, lh), pos: (a.0, cy, zc), ori: a.1 });
-            out.push(B { wedge: true, size: (1, hh, lh), pos: (b.0, cy, zc), ori: b.1 });
+            out.push(B { kind: Kind::Wedge, size: (hh, 1, lh), pos: (a.0, cy, zc), ori: a.1 });
+            out.push(B { kind: Kind::Wedge, size: (1, hh, lh), pos: (b.0, cy, zc), ori: b.1 });
         }
         WallStyle::MicroBrick => {
-            out.push(B { wedge: false, size: (s.wall_thickness / 2, lh, hh), pos: (cx, cy, zc), ori: 16 });
+            out.push(B { kind: Kind::Micro, size: (s.wall_thickness / 2, lh, hh), pos: (cx, cy, zc), ori: 16 });
         }
     }
 }
@@ -220,10 +233,9 @@ fn wall_base(s: &Settings) -> i32 {
 }
 
 /// The four walls of one piece (strip direction = local X).
-fn piece_walls(s: &Settings, g: &Geo) -> Vec<B> {
+fn piece_walls(s: &Settings, g: &Geo, lh: i32) -> Vec<B> {
     let mut v = Vec::new();
     let zb = wall_base(s);
-    let lh = g.wall_half;
     wall(s, g.side_x, 0, zb, lh, true, &mut v);
     wall(s, -g.side_x, 0, zb, lh, false, &mut v);
     wall(s, 0, g.leg_y, zb, lh, false, &mut v);
@@ -254,7 +266,7 @@ fn spoke_brick(s: &Settings, g: &Geo, trim_fwd: bool, trim_back: bool) -> B {
     }
     let cx = (fwd - back) / 2;
     // size (t, half, t) with rotation 3 runs along local X (as in the user's file).
-    B { wedge: false, size: (t, total / 2, t), pos: (cx, 0, z), ori: 19 }
+    B { kind: Kind::Micro, size: (t, total / 2, t), pos: (cx, 0, z), ori: 19 }
 }
 
 // ---------- honeycomb geometry ----------
@@ -269,6 +281,8 @@ struct Geo {
     side_x: i32,
     leg_y: i32,
     wall_half: i32,
+    /// Entity walls: full length when they run through the pillars.
+    ent_wall_half: i32,
     across: bool,
 }
 
@@ -282,6 +296,7 @@ fn geo(s: &Settings) -> Geo {
         side_x: s.cell / 2,
         leg_y: (1.5 * side).round() as i32,
         wall_half: ((side / 2.0).round() as i32 - s.corner_posts / 2).max(1),
+        ent_wall_half: if s.walls_through { ((side / 2.0).round() as i32).max(1) } else { ((side / 2.0).round() as i32 - s.corner_posts / 2).max(1) },
         across: s.turn == Turn::WallsAcross,
     }
 }
@@ -397,6 +412,9 @@ pub fn validate(s: &Settings) -> Result<(), String> {
     even(s.wall_height, "Wall height")?;
     even(s.wall_thickness, "Wall thickness")?;
     even(s.spoke_thickness, "Spoke thickness")?;
+    if s.posts_extra % 2 != 0 || s.wall_height + s.posts_extra < 2 {
+        return Err("Pillar height must be a whole number of micro bricks and at least 1 tall".into());
+    }
     if s.corner_posts < 0 || s.corner_posts % 2 != 0 || s.corner_posts > s.cell / 2 {
         return Err("Corner posts must be a whole number of micro bricks, at most a quarter of the cell".into());
     }
@@ -489,12 +507,13 @@ pub fn build(s: &Settings) -> Result<Built, String> {
     // Main grid: pieces whose direction is 0° (only when walls are upright).
     let main_k: Option<usize> = if s.turn == Turn::WallsUpright { Some(0) } else { None };
     let mut main: Vec<B> = Vec::new();
-    let walls_t = piece_walls(s, &g);
+    let walls_main = piece_walls(s, &g, g.wall_half);
+    let walls_ent = piece_walls(s, &g, g.ent_wall_half);
     let mut main_move: f64 = 0.0;
-    let piece_bricks = |walls: bool, spoke: bool, tf: bool, tb: bool| -> Vec<B> {
+    let piece_bricks = |walls: bool, spoke: bool, tf: bool, tb: bool, on_main: bool| -> Vec<B> {
         let mut v = Vec::new();
         if walls {
-            v.extend(walls_t.iter().copied());
+            v.extend(if on_main { walls_main.iter() } else { walls_ent.iter() }.copied());
         }
         if spoke {
             v.push(spoke_brick(s, &g, tf, tb));
@@ -507,7 +526,7 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         }
         let (cx, cy) = (x.round() as i32, y.round() as i32);
         main_move = main_move.max((x - cx as f64).hypot(y - cy as f64));
-        for mut b in piece_bricks(w, sp, tf, tb) {
+        for mut b in piece_bricks(w, sp, tf, tb, true) {
             if upside {
                 b = flip_x(b);
             }
@@ -537,8 +556,9 @@ pub fn build(s: &Settings) -> Result<Built, String> {
     // Corner posts on the main grid.
     if s.corner_posts > 0 {
         let ph = s.corner_posts / 2;
-        let hh = s.wall_height / 2;
+        let hh = s.wall_height / 2 + s.posts_extra / 2;
         let zc = wall_base(s) + hh;
+        let kind = if s.posts_round { Kind::Pole } else { Kind::Micro };
         let mut posts: Vec<(i32, i32)> = Vec::new();
         if let Some(mk) = main_k {
             // Next to the end of each main-grid wall (all main walls run along Y here).
@@ -564,7 +584,7 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         posts.dedup();
         for (px, py) in posts {
             let (z, ori) = if upside { (-zc, 20u8) } else { (zc, 16u8) };
-            main.push(B { wedge: false, size: (ph, ph, hh), pos: (px, py, z), ori });
+            main.push(B { kind, size: (ph, ph, hh), pos: (px, py, z), ori });
         }
     }
 
@@ -587,7 +607,7 @@ pub fn build(s: &Settings) -> Result<Built, String> {
             continue;
         }
         let m = ent_matrix(dirs[k], upside);
-        for b in piece_bricks(w, sp, tf, tb) {
+        for b in piece_bricks(w, sp, tf, tb, false) {
             let h = half(&b);
             let zc = if upside { -(b.pos.2 as f64) } else { b.pos.2 as f64 };
             let (z0, z1) = (zc - h.2 as f64, zc + h.2 as f64);
@@ -738,7 +758,7 @@ pub fn build(s: &Settings) -> Result<Built, String> {
             let t = mul_t(&m, (x - origin.0 as f64, y - origin.1 as f64, 0.0));
             let (tx, ty) = (t.0.round() as i32, t.1.round() as i32);
             mv = mv.max((t.0 - tx as f64).hypot(t.1 - ty as f64));
-            for mut b in piece_bricks(w, sp, tf, tb) {
+            for mut b in piece_bricks(w, sp, tf, tb, false) {
                 b.pos = (b.pos.0 + tx, b.pos.1 + ty, b.pos.2);
                 bricks.push(b);
             }
@@ -785,7 +805,7 @@ fn to_brick(s: &Settings, b: &B) -> Brick {
     let rot = [Rotation::Deg0, Rotation::Deg90, Rotation::Deg180, Rotation::Deg270][(b.ori & 3) as usize];
     Brick {
         asset: BrickType::Procedural {
-            asset: brdb::BString::str(if b.wedge { MICRO_WEDGE } else { MICRO_BRICK }),
+            asset: brdb::BString::str(match b.kind { Kind::Wedge => MICRO_WEDGE, Kind::Pole => POLE, Kind::Micro => MICRO_BRICK }),
             size: BrickSize { x: b.size.0 as u16, y: b.size.1 as u16, z: b.size.2 as u16 },
         },
         position: (b.pos.0, b.pos.1, b.pos.2).into(),

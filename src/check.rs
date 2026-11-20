@@ -48,7 +48,7 @@ pub fn check(s: &Settings, built: &Built) -> Vec<String> {
             }
         }
         // Bearing must not clash with main-grid bricks.
-        let bear = B { wedge: false, size: (1, 1, 1), pos: g.bearing, ori: 16 };
+        let bear = B { kind: Kind::Micro, size: (1, 1, 1), pos: g.bearing, ori: 16 };
         if built.main.iter().any(|b| boxes_overlap(b, &bear)) {
             p.push(format!("entity {i}: bearing overlaps a main-grid brick"));
         }
