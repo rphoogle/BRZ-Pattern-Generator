@@ -1,6 +1,6 @@
 [package]
 name = "brz-pattern-generator"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Angled brick patterns for Brickadia, held on rigid bearings, saved as prefabs"
 license = "MIT"
@@ -24,3 +24,7 @@ brdb = "1.0.5"
 opt-level = 3
 lto = "thin"
 strip = true
+
+[[bin]]
+name = "joinpack"
+path = "src/bin/joinpack.rs"

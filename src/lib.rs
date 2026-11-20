@@ -72,6 +72,10 @@ pub struct Settings {
     pub width: i32,
     pub length: i32,
     pub way_up: WayUp,
+    /// Corner posts: width in units (0 = off). Walls are shortened to end at the posts.
+    pub corner_posts: i32,
+    /// Try many bearing spots and keep the one whose rounding makes corners meet best.
+    pub best_bearings: bool,
     pub color: [u8; 3],
     pub material: usize,
     pub intensity: u8,
@@ -102,6 +106,8 @@ impl Default for Settings {
             width: 400,
             length: 400,
             way_up: WayUp::Upright,
+            corner_posts: 0,
+            best_bearings: true,
             color: [0xDB, 0xBE, 0xC0],
             material: 0,
             intensity: 0,
@@ -140,6 +146,9 @@ pub struct Built {
     pub cells: usize,
     pub max_move: f64,
     pub angles: Vec<f64>,
+    /// How far wall ends miss at corners (units): average and worst.
+    pub corner_mean: f64,
+    pub corner_worst: f64,
 }
 
 impl Built {
@@ -251,6 +260,8 @@ fn spoke_brick(s: &Settings, g: &Geo, trim_fwd: bool, trim_back: bool) -> B {
 // ---------- honeycomb geometry ----------
 
 struct Geo {
+    /// Exact wall length of a perfect honeycomb.
+    side: f64,
     /// Distance between cell centres along a row.
     col: f64,
     /// Distance between rows.
@@ -265,11 +276,12 @@ fn geo(s: &Settings) -> Geo {
     let f = s.cell as f64;
     let side = f / 3f64.sqrt();
     Geo {
+        side,
         col: f * s.stretch_h / 100.0,
         row: 1.5 * side * s.stretch_v / 100.0,
         side_x: s.cell / 2,
         leg_y: (1.5 * side).round() as i32,
-        wall_half: ((side / 2.0).round() as i32).max(1),
+        wall_half: ((side / 2.0).round() as i32 - s.corner_posts / 2).max(1),
         across: s.turn == Turn::WallsAcross,
     }
 }
@@ -385,6 +397,9 @@ pub fn validate(s: &Settings) -> Result<(), String> {
     even(s.wall_height, "Wall height")?;
     even(s.wall_thickness, "Wall thickness")?;
     even(s.spoke_thickness, "Spoke thickness")?;
+    if s.corner_posts < 0 || s.corner_posts % 2 != 0 || s.corner_posts > s.cell / 2 {
+        return Err("Corner posts must be a whole number of micro bricks, at most a quarter of the cell".into());
+    }
     if s.cell < 8 {
         return Err("Cell size must be at least 4 micro bricks".into());
     }
@@ -412,7 +427,7 @@ pub fn build(s: &Settings) -> Result<Built, String> {
     }
     let g = geo(s);
     let upside = s.way_up == WayUp::UpsideDown;
-    let turn = if s.turn == Turn::WallsAcross { 90.0 } else { 0.0 };
+    let turn: f64 = if s.turn == Turn::WallsAcross { 90.0 } else { 0.0 };
     let dirs = [turn, turn + 60.0, turn + 120.0];
 
     // Pieces in world: (direction index, centre x, y, walls?, spoke?)
@@ -501,6 +516,58 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         }
     }
 
+    // Ideal corners: which pieces' walls meet at each corner.
+    let ends_local = |g: &Geo| -> Vec<(f64, f64)> {
+        let (sx, ly, hs) = (s.cell as f64 / 2.0, 1.5 * g.side, g.side / 2.0);
+        vec![(sx, hs), (sx, -hs), (-sx, hs), (-sx, -hs), (0.0, ly + hs), (0.0, ly - hs), (0.0, -ly + hs), (0.0, -ly - hs)]
+    };
+    let mut corners: std::collections::HashMap<(i64, i64), Vec<usize>> = std::collections::HashMap::new();
+    for (i, p) in pieces.iter().enumerate() {
+        if !p.3 {
+            continue;
+        }
+        let th = dirs[p.0].to_radians();
+        let (c, sn) = (th.cos(), th.sin());
+        for (lx, ly) in ends_local(&g) {
+            let (wx, wy) = (p.1 + c * lx - sn * ly, p.2 + sn * lx + c * ly);
+            corners.entry(((wx * 20.0).round() as i64, (wy * 20.0).round() as i64)).or_default().push(i);
+        }
+    }
+
+    // Corner posts on the main grid.
+    if s.corner_posts > 0 {
+        let ph = s.corner_posts / 2;
+        let hh = s.wall_height / 2;
+        let zc = wall_base(s) + hh;
+        let mut posts: Vec<(i32, i32)> = Vec::new();
+        if let Some(mk) = main_k {
+            // Next to the end of each main-grid wall (all main walls run along Y here).
+            for &(k, x, y, w, ..) in &pieces {
+                if k != mk || !w {
+                    continue;
+                }
+                let (cx, cy) = (x.round() as i32, y.round() as i32);
+                for (wx, wy) in [(g.side_x, 0), (-g.side_x, 0), (0, g.leg_y), (0, -g.leg_y)] {
+                    for sgn in [1, -1] {
+                        posts.push((cx + wx, cy + wy + sgn * (g.wall_half + ph)));
+                    }
+                }
+            }
+        }
+        for key in corners.keys() {
+            let (vx, vy) = ((key.0 as f64 / 20.0).round() as i32, (key.1 as f64 / 20.0).round() as i32);
+            if !posts.iter().any(|(px, py)| (px - vx).abs() < 2 * ph + 2 && (py - vy).abs() < 2 * ph + 2) {
+                posts.push((vx, vy));
+            }
+        }
+        posts.sort();
+        posts.dedup();
+        for (px, py) in posts {
+            let (z, ori) = if upside { (-zc, 20u8) } else { (zc, 16u8) };
+            main.push(B { wedge: false, size: (ph, ph, hh), pos: (px, py, z), ori });
+        }
+    }
+
     // Base-layer footprint of everything, for finding free bearing spots.
     let mut taken: Vec<((f64, f64), (f64, f64))> = Vec::new();
     let base_band = |b: &B| -> bool {
@@ -540,44 +607,134 @@ pub fn build(s: &Settings) -> Result<Built, String> {
     let mx = pieces.iter().map(|p| p.1).sum::<f64>() / n;
     let my = pieces.iter().map(|p| p.2).sum::<f64>() / n;
 
-    let ent_ks: Vec<usize> = (0..3).filter(|k| Some(*k) != main_k).collect();
-    let mut entities = Vec::new();
-    let mut max_move = main_move;
-    let mut bearings: Vec<(i32, i32)> = Vec::new();
-    for &k in &ent_ks {
-        let yaw = norm(dirs[k]);
-        let m = ent_matrix(yaw, upside);
-        let mine: Vec<&(usize, f64, f64, bool, bool, bool, bool)> = pieces.iter().filter(|p| p.0 == k).collect();
-        if mine.is_empty() {
-            continue;
+    let ent_ks: Vec<usize> = (0..3).filter(|k| Some(*k) != main_k && pieces.iter().any(|p| p.0 == *k)).collect();
+
+    // Rounding error of each piece (world units). Main-grid pieces are fixed.
+    let mut err: Vec<(f64, f64)> = vec![(0.0, 0.0); pieces.len()];
+    for (i, p) in pieces.iter().enumerate() {
+        if Some(p.0) == main_k {
+            err[i] = (p.1.round() - p.1, p.2.round() - p.2);
         }
-        // Find a free spot for the bearing, spiralling out from the middle.
-        let mut found = None;
-        'search: for rad in 0..200i32 {
-            for dx in -rad..=rad {
-                for dy in -rad..=rad {
-                    if dx.abs() != rad && dy.abs() != rad {
-                        continue;
-                    }
-                    let (bx, by) = (mx.round() as i32 + dx, my.round() as i32 + dy);
-                    let lo = ((bx - 1) as f64, (by - 1) as f64);
-                    let hi = ((bx + 1) as f64, (by + 1) as f64);
-                    let clash = taken.iter().any(|(a, b)| hi.0 > a.0 && lo.0 < b.0 && hi.1 > a.1 && lo.1 < b.1)
-                        || bearings.iter().any(|(ox, oy)| (ox - bx).abs() < 3 && (oy - by).abs() < 3);
-                    if !clash {
-                        found = Some((bx, by));
+    }
+    let ent_err = |k: usize, o: (i32, i32), err: &mut Vec<(f64, f64)>| {
+        let m = ent_matrix(norm(dirs[k]), upside);
+        for (i, p) in pieces.iter().enumerate() {
+            if p.0 != k {
+                continue;
+            }
+            let t = mul_t(&m, (p.1 - o.0 as f64, p.2 - o.1 as f64, 0.0));
+            let d = (t.0.round() - t.0, t.1.round() - t.1, 0.0);
+            let e = mul(&m, d);
+            err[i] = (e.0, e.1);
+        }
+    };
+    // How badly corners miss: sum of squared spread, and the worst single corner.
+    let corner_cost = |err: &Vec<(f64, f64)>| -> (f64, f64) {
+        let (mut sum, mut worst) = (0.0f64, 0.0f64);
+        for v in corners.values() {
+            if v.len() < 2 {
+                continue;
+            }
+            let n = v.len() as f64;
+            let mx = v.iter().map(|i| err[*i].0).sum::<f64>() / n;
+            let my = v.iter().map(|i| err[*i].1).sum::<f64>() / n;
+            for i in v {
+                let d2 = (err[*i].0 - mx).powi(2) + (err[*i].1 - my).powi(2);
+                sum += d2;
+                worst = worst.max(d2.sqrt());
+            }
+        }
+        (sum, worst)
+    };
+
+    // Free bearing spots, nearest the middle first.
+    let free = |bx: i32, by: i32, others: &[(i32, i32)]| -> bool {
+        let lo = ((bx - 1) as f64, (by - 1) as f64);
+        let hi = ((bx + 1) as f64, (by + 1) as f64);
+        !taken.iter().any(|(a, b)| hi.0 > a.0 && lo.0 < b.0 && hi.1 > a.1 && lo.1 < b.1)
+            && !others.iter().any(|(ox, oy)| (ox - bx).abs() < 3 && (oy - by).abs() < 3)
+    };
+    let mut spots: Vec<(i32, i32)> = Vec::new();
+    let limit = if s.best_bearings { 2500 } else { 50 };
+    'search: for rad in 0..200i32 {
+        for dx in -rad..=rad {
+            for dy in -rad..=rad {
+                if dx.abs() != rad && dy.abs() != rad {
+                    continue;
+                }
+                let (bx, by) = (mx.round() as i32 + dx, my.round() as i32 + dy);
+                if free(bx, by, &[]) {
+                    spots.push((bx, by));
+                    if spots.len() >= limit {
                         break 'search;
                     }
                 }
             }
         }
-        let (bx, by) = found.ok_or("No free spot for a bearing")?;
-        bearings.push((bx, by));
+    }
+    if spots.is_empty() {
+        return Err("No free spot for a bearing".into());
+    }
+    // Start with the nearest free spots, then (if asked) improve one entity at a time.
+    let mut chosen: Vec<(i32, i32)> = Vec::new();
+    for _ in &ent_ks {
+        let pick = *spots.iter().find(|p| free(p.0, p.1, &chosen)).ok_or("No free spot for a bearing")?;
+        chosen.push(pick);
+    }
+    for (j, &k) in ent_ks.iter().enumerate() {
+        ent_err(k, chosen[j], &mut err);
+    }
+    if s.best_bearings {
+        for _pass in 0..2 {
+            for (j, &k) in ent_ks.iter().enumerate() {
+                let others: Vec<(i32, i32)> = chosen.iter().enumerate().filter(|(i, _)| *i != j).map(|(_, p)| *p).collect();
+                let mut best = (corner_cost(&err).0, chosen[j]);
+                for &sp in &spots {
+                    if !free(sp.0, sp.1, &others) {
+                        continue;
+                    }
+                    ent_err(k, sp, &mut err);
+                    let c = corner_cost(&err).0;
+                    if c < best.0 - 1e-9 {
+                        best = (c, sp);
+                    }
+                }
+                chosen[j] = best.1;
+                ent_err(k, chosen[j], &mut err);
+            }
+        }
+    }
+    let (_, worst_corner) = corner_cost(&err);
+    let mean_corner = {
+        let (mut t, mut n) = (0.0, 0.0);
+        for v in corners.values() {
+            if v.len() < 2 {
+                continue;
+            }
+            let k = v.len() as f64;
+            let mx = v.iter().map(|i| err[*i].0).sum::<f64>() / k;
+            let my = v.iter().map(|i| err[*i].1).sum::<f64>() / k;
+            let spread = v.iter().map(|i| (err[*i].0 - mx).hypot(err[*i].1 - my)).fold(0.0, f64::max);
+            t += spread;
+            n += 1.0;
+        }
+        if n > 0.0 { t / n } else { 0.0 }
+    };
+
+    let mut entities = Vec::new();
+    let mut max_move = main_move;
+    for (j, &k) in ent_ks.iter().enumerate() {
+        let yaw = norm(dirs[k]);
+        let m = ent_matrix(yaw, upside);
+        let (bx, by) = chosen[j];
         let bz = if upside { -1 } else { 1 };
         let origin = (bx, by, 0);
         let mut bricks = Vec::new();
         let mut mv: f64 = 0.0;
-        for &&(_, x, y, w, sp, tf, tb) in &mine {
+        for &(pk, x, y, w, sp, tf, tb) in &pieces {
+            if pk != k {
+                continue;
+            }
             let t = mul_t(&m, (x - origin.0 as f64, y - origin.1 as f64, 0.0));
             let (tx, ty) = (t.0.round() as i32, t.1.round() as i32);
             mv = mv.max((t.0 - tx as f64).hypot(t.1 - ty as f64));
@@ -591,7 +748,7 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         entities.push(Grid { yaw: Some(yaw), bricks, origin, bearing: (bx, by, bz), angle, max_move: mv });
     }
     let angles = (0..3).map(|k| norm(dirs[k]).rem_euclid(180.0)).collect();
-    Ok(Built { main, entities, cells, max_move, angles })
+    Ok(Built { main, entities, cells, max_move, angles, corner_mean: mean_corner, corner_worst: worst_corner })
 }
 
 /// World-space bounding box of everything (entities as turned boxes).

@@ -11,9 +11,9 @@ fn main() {
                     for &turn in &[Turn::WallsUpright, Turn::WallsAcross] {
                         for &cell in &[10, 20, 30, 40] {
                             for &flip in &[false, true] {
-                                for &top in &[false, true] {
+                                for &(top, posts) in &[(false, 0), (true, 0), (false, 2), (true, 4)] {
                                     let s = Settings {
-                                        style, spokes, area, way_up, turn, cell, flip_wedges: flip, spoke_top: top,
+                                        style, spokes, area, way_up, turn, cell, flip_wedges: flip, spoke_top: top, corner_posts: posts, best_bearings: cell == 20 && flip,
                                         width: cell * 8, length: cell * 6,
                                         ..Settings::default()
                                     };
@@ -23,7 +23,7 @@ fn main() {
                                             let p = check::check(&s, &b);
                                             if !p.is_empty() {
                                                 bad += 1;
-                                                if true { println!("PROBLEM {:?} {:?} {:?} {:?} {:?} cell {} flip {} top {}: {}", style, spokes, area, way_up, turn, cell, flip, top, p.join("; ")); }
+                                                if true { println!("PROBLEM {:?} {:?} {:?} {:?} {:?} cell {} flip {} top {} posts {}: {}", style, spokes, area, way_up, turn, cell, flip, top, posts, p.join("; ")); }
                                             }
                                         }
                                         Err(e) => { bad += 1; if bad < 15 { println!("ERROR {e}"); } }
