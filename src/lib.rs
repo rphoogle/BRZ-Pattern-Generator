@@ -114,7 +114,7 @@ impl Default for Settings {
             length: 400,
             way_up: WayUp::Upright,
             corner_posts: 0,
-            posts_round: false,
+            posts_round: true,
             walls_through: true,
             posts_extra: 0,
             best_bearings: true,
@@ -675,7 +675,8 @@ pub fn build(s: &Settings) -> Result<Built, String> {
             && !others.iter().any(|(ox, oy)| (ox - bx).abs() < 3 && (oy - by).abs() < 3)
     };
     let mut spots: Vec<(i32, i32)> = Vec::new();
-    let limit = if s.best_bearings { 2500 } else { 50 };
+    // Fewer candidate spots on very large patterns, so building stays quick.
+    let limit = if s.best_bearings { (3_000_000 / corners.len().max(1)).clamp(150, 2500) } else { 50 };
     'search: for rad in 0..200i32 {
         for dx in -rad..=rad {
             for dy in -rad..=rad {
@@ -903,3 +904,145 @@ pub fn write_brz(s: &Settings, path: &std::path::Path) -> Result<Built, String> 
 }
 
 pub mod check;
+
+// ---------- preview footprints ----------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FootKind { Wall, Spoke, Pillar, Bearing }
+
+/// One brick seen from above: four corners (world units), which grid it is
+/// on (0 = main grid, 1.. = entities in order) and what it is.
+#[derive(Clone, Debug)]
+pub struct Foot {
+    pub pts: [(f64, f64); 4],
+    pub grid: usize,
+    pub kind: FootKind,
+}
+
+fn foot_kind(b: &B) -> FootKind {
+    match b.kind {
+        Kind::Wedge => FootKind::Wall,
+        Kind::Pole => FootKind::Pillar,
+        Kind::Micro => {
+            let h = half(b);
+            // spokes are flat strips; pillars are square posts; the rest are walls
+            if h.0 == h.1 && h.2 > h.0 { FootKind::Pillar } else if h.2 <= h.0.min(h.1) { FootKind::Spoke } else { FootKind::Wall }
+        }
+    }
+}
+
+/// Footprints of everything, for drawing the top-down preview.
+pub fn footprints(s: &Settings, built: &Built) -> Vec<Foot> {
+    let upside = s.way_up == WayUp::UpsideDown;
+    let mut v = Vec::new();
+    let rect = |cx: f64, cy: f64, hx: f64, hy: f64| [(cx - hx, cy - hy), (cx + hx, cy - hy), (cx + hx, cy + hy), (cx - hx, cy + hy)];
+    for b in &built.main {
+        let h = half(b);
+        v.push(Foot { pts: rect(b.pos.0 as f64, b.pos.1 as f64, h.0 as f64, h.1 as f64), grid: 0, kind: foot_kind(b) });
+    }
+    for (i, g) in built.entities.iter().enumerate() {
+        let m = ent_matrix(g.yaw.unwrap(), upside);
+        for b in &g.bricks {
+            let h = half(b);
+            let mut pts = [(0.0, 0.0); 4];
+            for (j, (sx, sy)) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().enumerate() {
+                let p = mul(&m, (b.pos.0 as f64 + sx * h.0 as f64, b.pos.1 as f64 + sy * h.1 as f64, 0.0));
+                pts[j] = (p.0 + g.origin.0 as f64, p.1 + g.origin.1 as f64);
+            }
+            v.push(Foot { pts, grid: i + 1, kind: foot_kind(b) });
+        }
+        v.push(Foot { pts: rect(g.bearing.0 as f64, g.bearing.1 as f64, 1.0, 1.0), grid: 0, kind: FootKind::Bearing });
+    }
+    v
+}
+
+// ---------- settings as text (presets) ----------
+
+impl Settings {
+    pub fn to_text(&self) -> String {
+        let e = |x: &dyn std::fmt::Debug| format!("{x:?}");
+        let lines = [
+            ("cell", self.cell.to_string()),
+            ("stretch_h", self.stretch_h.to_string()),
+            ("stretch_v", self.stretch_v.to_string()),
+            ("turn", e(&self.turn)),
+            ("style", e(&self.style)),
+            ("wall_height", self.wall_height.to_string()),
+            ("wall_thickness", self.wall_thickness.to_string()),
+            ("flip_wedges", self.flip_wedges.to_string()),
+            ("spokes", e(&self.spokes)),
+            ("spoke_dirs", format!("{},{},{}", self.spoke_dirs[0], self.spoke_dirs[1], self.spoke_dirs[2])),
+            ("spoke_every", self.spoke_every.to_string()),
+            ("spoke_rows", self.spoke_rows.to_string()),
+            ("spoke_offset", self.spoke_offset.to_string()),
+            ("spoke_stagger", self.spoke_stagger.to_string()),
+            ("spoke_length", self.spoke_length.to_string()),
+            ("spoke_thickness", self.spoke_thickness.to_string()),
+            ("spoke_top", self.spoke_top.to_string()),
+            ("area", e(&self.area)),
+            ("width", self.width.to_string()),
+            ("length", self.length.to_string()),
+            ("way_up", e(&self.way_up)),
+            ("corner_posts", self.corner_posts.to_string()),
+            ("posts_round", self.posts_round.to_string()),
+            ("walls_through", self.walls_through.to_string()),
+            ("posts_extra", self.posts_extra.to_string()),
+            ("best_bearings", self.best_bearings.to_string()),
+            ("color", format!("{},{},{}", self.color[0], self.color[1], self.color[2])),
+            ("material", self.material.to_string()),
+            ("intensity", self.intensity.to_string()),
+        ];
+        lines.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
+    }
+
+    /// Reads text written by `to_text`; unknown or broken lines are skipped.
+    pub fn from_text(t: &str) -> Settings {
+        let mut s = Settings::default();
+        for line in t.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let v = v.trim();
+            let i = || v.parse::<i32>().ok();
+            let f = || v.parse::<f64>().ok();
+            let b = || v.parse::<bool>().ok();
+            match k.trim() {
+                "cell" => if let Some(x) = i() { s.cell = x },
+                "stretch_h" => if let Some(x) = f() { s.stretch_h = x },
+                "stretch_v" => if let Some(x) = f() { s.stretch_v = x },
+                "turn" => s.turn = if v == "WallsAcross" { Turn::WallsAcross } else { Turn::WallsUpright },
+                "style" => s.style = if v == "MicroBrick" { WallStyle::MicroBrick } else { WallStyle::MicroWedge },
+                "wall_height" => if let Some(x) = i() { s.wall_height = x },
+                "wall_thickness" => if let Some(x) = i() { s.wall_thickness = x },
+                "flip_wedges" => if let Some(x) = b() { s.flip_wedges = x },
+                "spokes" => s.spokes = match v { "None" => SpokeMode::None, "EveryCell" => SpokeMode::EveryCell, "AltRows" => SpokeMode::AltRows, _ => SpokeMode::Custom },
+                "spoke_dirs" => {
+                    let p: Vec<bool> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if p.len() == 3 { s.spoke_dirs = [p[0], p[1], p[2]] }
+                }
+                "spoke_every" => if let Some(x) = i() { s.spoke_every = x },
+                "spoke_rows" => if let Some(x) = i() { s.spoke_rows = x },
+                "spoke_offset" => if let Some(x) = i() { s.spoke_offset = x },
+                "spoke_stagger" => if let Some(x) = b() { s.spoke_stagger = x },
+                "spoke_length" => if let Some(x) = i() { s.spoke_length = x },
+                "spoke_thickness" => if let Some(x) = i() { s.spoke_thickness = x },
+                "spoke_top" => if let Some(x) = b() { s.spoke_top = x },
+                "area" => s.area = match v { "Rectangle" => Area::Rectangle, "Circle" => Area::Circle, "Oval" => Area::Oval, _ => Area::Hexagon },
+                "width" => if let Some(x) = i() { s.width = x },
+                "length" => if let Some(x) = i() { s.length = x },
+                "way_up" => s.way_up = if v == "UpsideDown" { WayUp::UpsideDown } else { WayUp::Upright },
+                "corner_posts" => if let Some(x) = i() { s.corner_posts = x },
+                "posts_round" => if let Some(x) = b() { s.posts_round = x },
+                "walls_through" => if let Some(x) = b() { s.walls_through = x },
+                "posts_extra" => if let Some(x) = i() { s.posts_extra = x },
+                "best_bearings" => if let Some(x) = b() { s.best_bearings = x },
+                "color" => {
+                    let p: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if p.len() == 3 { s.color = [p[0], p[1], p[2]] }
+                }
+                "material" => if let Some(x) = v.parse::<usize>().ok() { s.material = x.min(MATERIALS.len() - 1) },
+                "intensity" => if let Some(x) = v.parse::<u8>().ok() { s.intensity = x.min(10) },
+                _ => {}
+            }
+        }
+        s
+    }
+}

@@ -1,9 +1,8 @@
-name: Build and self-test
+name: Build Windows .exe
 
 # Runs on every push, and can be started by hand from the Actions tab
-# ("Run workflow"). Stage 1 has no window yet: the build runs the self-test
-# and makes the in-game test pack, which appears as a download at the bottom
-# of the run's page under "Artifacts".
+# ("Run workflow"). The finished BRZPatternGenerator.exe appears as a
+# download at the bottom of the run's page under "Artifacts".
 on:
   push:
   workflow_dispatch:
@@ -15,11 +14,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Self-test (overlap / bearing / read-back check on 2,000+ layouts)
-        run: cargo run --release --bin selftest
-      - name: Make the in-game test pack
-        run: cargo run --release --bin testpack
+      - name: Self-test (overlap / bearing / read-back check on 5,000+ layouts)
+        run: cargo run --release --no-default-features --bin selftest
+      - name: Build the program
+        run: cargo build --release --bin BRZPatternGenerator
       - uses: actions/upload-artifact@v4
         with:
-          name: PatternGenerator-testpack
-          path: testpack/*.brz
+          name: BRZPatternGenerator-windows
+          path: target/release/BRZPatternGenerator.exe

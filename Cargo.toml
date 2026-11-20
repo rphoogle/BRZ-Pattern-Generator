@@ -1,6 +1,6 @@
 [package]
 name = "brz-pattern-generator"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Angled brick patterns for Brickadia, held on rigid bearings, saved as prefabs"
 license = "MIT"
@@ -10,6 +10,11 @@ name = "patterngen"
 path = "src/lib.rs"
 
 [[bin]]
+name = "BRZPatternGenerator"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
 name = "selftest"
 path = "src/bin/selftest.rs"
 
@@ -17,8 +22,18 @@ path = "src/bin/selftest.rs"
 name = "testpack"
 path = "src/bin/testpack.rs"
 
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:egui", "dep:dirs"]
+
 [dependencies]
 brdb = "1.0.5"
+eframe = { version = "0.33.3", optional = true, features = ["persistence"] }
+egui = { version = "0.33.3", optional = true }
+dirs = { version = "5", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = { version = "5.4.1", features = ["windows-win"] }
 
 [profile.release]
 opt-level = 3
@@ -32,3 +47,4 @@ path = "src/bin/joinpack.rs"
 [[bin]]
 name = "pillarpack"
 path = "src/bin/pillarpack.rs"
+
