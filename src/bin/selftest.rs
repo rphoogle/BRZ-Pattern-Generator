@@ -36,6 +36,47 @@ fn main() {
             }
         }
     }
+    // The other patterns.
+    let mut skipped = 0;
+    for p in Pattern::ALL.iter().skip(1) {
+        for &style in &[WallStyle::MicroWedge, WallStyle::MicroBrick] {
+            for &spokes in &[SpokeMode::None, SpokeMode::EveryCell, SpokeMode::AltRows, SpokeMode::Custom] {
+                for &area in &[Area::Hexagon, Area::Rectangle, Area::Circle, Area::Oval] {
+                    for &way_up in &[WayUp::Upright, WayUp::UpsideDown] {
+                        for &turn in &[Turn::WallsUpright, Turn::WallsAcross] {
+                            for &cell in &[10, 20, 40] {
+                                for &(top, posts, round, through, extra, flip) in &[(false, 0, false, true, 0, false), (true, 4, true, false, 4, true), (false, 16, false, true, -2, false)] {
+                                    let s = Settings {
+                                        pattern: *p, style, spokes, area, way_up, turn, cell, flip_wedges: flip, spoke_top: top, corner_posts: posts, posts_round: round, walls_through: through, posts_extra: extra,
+                                        wall_thickness: 2, best_bearings: cell == 20,
+                                        width: cell * 8, length: cell * 6,
+                                        ..Settings::default()
+                                    };
+                                    n += 1;
+                                    match build(&s) {
+                                        Ok(b) => {
+                                            let pr = check::check(&s, &b);
+                                            if !pr.is_empty() {
+                                                bad += 1;
+                                                if bad < 400 { println!("PROBLEM {:?} {:?} {:?} {:?} {:?} {:?} cell {} top {} posts {}: {}", p, style, spokes, area, way_up, turn, cell, top, posts, pr.join("; ")); }
+                                            }
+                                        }
+                                        Err(e) if e.starts_with("Walls are too thick") => skipped += 1,
+                                        Err(e) => { bad += 1; if bad < 400 { println!("ERROR {e} | {:?} {:?} {:?} {:?} {:?} {:?} cell {} posts {}", p, style, spokes, area, way_up, turn, cell, posts); } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("({skipped} skipped: walls too thick for the cell, as expected)");
+    for p in Pattern::ALL.iter().skip(1) {
+        let s = Settings { pattern: *p, corner_posts: 4, ..Settings::default() };
+        if let Err(e) = check::round_trip(&s) { bad += 1; println!("ROUND TRIP {:?}: {e}", p); }
+    }
     // Partial saves and per-part colours must write without errors.
     for (m, e, b) in [(true, false, false), (false, true, false), (false, false, true), (false, true, true), (true, true, false)] {
         let s = Settings { include_main: m, include_entities: e, include_bearings: b, one_paint: false, corner_posts: 30, ..Settings::default() };

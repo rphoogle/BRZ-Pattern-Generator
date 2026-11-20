@@ -40,11 +40,40 @@ pub enum Area { Hexagon, Rectangle, Circle, Oval }
 pub enum WayUp { Upright, UpsideDown }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Turn { WallsUpright, WallsAcross }
+/// Which pattern to draw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pattern { Honeycomb, Triangles, Stars, Cubes, Octagons, Diamonds }
+
+impl Pattern {
+    pub const ALL: [Pattern; 6] = [Pattern::Honeycomb, Pattern::Triangles, Pattern::Stars, Pattern::Cubes, Pattern::Octagons, Pattern::Diamonds];
+    pub fn label(self) -> &'static str {
+        match self {
+            Pattern::Honeycomb => "Honeycomb",
+            Pattern::Triangles => "Triangles",
+            Pattern::Stars => "Star of David",
+            Pattern::Cubes => "Cube illusion",
+            Pattern::Octagons => "Octagons and squares",
+            Pattern::Diamonds => "Diamonds",
+        }
+    }
+    /// Short name for file names.
+    pub fn short(self) -> &'static str {
+        match self {
+            Pattern::Honeycomb => "Honeycomb",
+            Pattern::Triangles => "Triangles",
+            Pattern::Stars => "Stars",
+            Pattern::Cubes => "Cubes",
+            Pattern::Octagons => "Octagons",
+            Pattern::Diamonds => "Diamonds",
+        }
+    }
+}
 
 /// Every setting, in brick units (2 units = 1 micro brick).
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub name: String,
+    pub pattern: Pattern,
     /// Cell size, flat side to flat side.
     pub cell: i32,
     /// Row spacing as a percentage of a perfect honeycomb (stretch V); 100 = perfect.
@@ -114,6 +143,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             name: "Honeycomb".into(),
+            pattern: Pattern::Honeycomb,
             cell: 20,
             stretch_v: 100.0,
             stretch_h: 100.0,
@@ -507,9 +537,17 @@ pub fn validate(s: &Settings) -> Result<(), String> {
 pub fn build(s: &Settings) -> Result<Built, String> {
     validate(s)?;
     if (s.stretch_h - 100.0).abs() > 1e-9 || (s.stretch_v - 100.0).abs() > 1e-9 {
-        // Stretch arrives in stage 3 (angles change, so pieces must be recut).
-        return Err("Stretch is not available yet (coming in stage 3)".into());
+        // Stretch arrives in v0.3.1 (angles change, so pieces must be recut).
+        return Err("Stretch is not available yet (coming in v0.3.1)".into());
     }
+    match s.pattern {
+        Pattern::Honeycomb => build_honeycomb(s),
+        _ => patterns::build_faces(s),
+    }
+}
+
+/// The honeycomb (its own code, as tested in game).
+fn build_honeycomb(s: &Settings) -> Result<Built, String> {
     let g = geo(s);
     let upside = s.way_up == WayUp::UpsideDown;
     let turn: f64 = if s.turn == Turn::WallsAcross { 90.0 } else { 0.0 };
@@ -1146,6 +1184,7 @@ pub fn write_brz(s: &Settings, path: &std::path::Path) -> Result<Built, String> 
 }
 
 pub mod check;
+pub mod patterns;
 
 // ---------- preview footprints ----------
 
@@ -1204,6 +1243,7 @@ impl Settings {
     pub fn to_text(&self) -> String {
         let e = |x: &dyn std::fmt::Debug| format!("{x:?}");
         let lines = [
+            ("pattern", e(&self.pattern)),
             ("cell", self.cell.to_string()),
             ("stretch_h", self.stretch_h.to_string()),
             ("stretch_v", self.stretch_v.to_string()),
@@ -1252,6 +1292,7 @@ impl Settings {
             let f = || v.parse::<f64>().ok();
             let b = || v.parse::<bool>().ok();
             match k.trim() {
+                "pattern" => if let Some(p) = Pattern::ALL.iter().find(|p| format!("{p:?}") == v) { s.pattern = *p },
                 "cell" => if let Some(x) = i() { s.cell = x },
                 "stretch_h" => if let Some(x) = f() { s.stretch_h = x },
                 "stretch_v" => if let Some(x) = f() { s.stretch_v = x },

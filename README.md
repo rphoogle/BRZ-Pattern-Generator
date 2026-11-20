@@ -1,17 +1,19 @@
 # BRZ Pattern Generator
 
-Angled brick patterns for Brickadia, starting with the honeycomb. Walls at 0°
+Angled brick patterns for Brickadia: honeycomb, triangles, star of David,
+cube illusion, octagons and squares, and diamonds. Walls at 0°
 go on the normal brick grid; walls at any other angle go on entities held at
 the right angle by hidden Micro Rigid Bearings, so the whole pattern is one
 connected prefab.
 
-**Status: stage 2 of 4** (v0.2.0: the window). Download the .exe from the latest run in the Actions tab (Artifacts).
+**Status: stage 3 of 4** (v0.3.0: five new patterns). Download the .exe from the latest run in the Actions tab (Artifacts).
 
 | Stage | What | State |
 |---|---|---|
 | 1 | Honeycomb engine, bearings, spokes, area shapes, pillars, self-test | done, tested in game |
-| 2 | Window: settings, live preview, counts, presets, save/copy | done, awaiting test |
-| 3 | Other patterns, stretch, paint mode | |
+| 2 | Window: settings, live preview, counts, presets, save/copy | done, tested in game (v0.2.1) |
+| 3a | Five other patterns (v0.3.0) | done, awaiting test |
+| 3b | Stretch, paint mode, PNG mask (v0.3.1) | |
 | 4 | Borders (clean cut / whole cells, frame), plate | |
 
 ## Files
@@ -19,10 +21,14 @@ connected prefab.
 - `src/lib.rs` – the pattern engine: works out the pieces, puts each on the
   main grid or a turned entity, finds a hidden spot for each bearing, and
   writes the prefab.
+- `src/patterns.rs` – the other five patterns: draws each as tiles, turns
+  every tile edge into a wall, groups walls by direction onto grids, and joins
+  walls that carry straight on into one long brick.
 - `src/check.rs` – the self-test: overlapping bricks, bearings in the way,
   sizes, and reading each file back.
-- `src/bin/selftest.rs` – runs the self-test over 2,000+ combinations.
-- `src/bin/testpack.rs` – writes the in-game test prefabs (T01–T12).
+- `src/bin/selftest.rs` – runs the self-test over 12,000+ combinations.
+- `src/bin/testpack.rs` – writes the in-game test prefabs for this version, with a top-down picture of each.
+- `src/bin/previewpng.rs` – draws every pattern from above (for checking shapes).
 
 Built with [brdb](https://crates.io/crates/brdb). See the spec
 (BRZ_Pattern_Generator_v1_Spec.docx) for the full plan.

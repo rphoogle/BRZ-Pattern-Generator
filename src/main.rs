@@ -71,6 +71,7 @@ struct App {
     presets: Vec<String>,
     preset_pick: usize,
     confirm_replace: Option<std::path::PathBuf>,
+    confirm_preset: Option<String>,
     cards_h: f32,
     real_colours: bool,
     part_hex: [String; 5],
@@ -103,6 +104,7 @@ impl App {
             presets: Vec::new(),
             preset_pick: 0,
             confirm_replace: None,
+            confirm_preset: None,
             cards_h: 190.0,
             real_colours: false,
             part_hex: std::array::from_fn(|_| hex_of(Settings::default().color)),
@@ -124,7 +126,7 @@ impl App {
         let way = if s.way_up == WayUp::UpsideDown { "_UpsideDown" } else { "" };
         let posts = if s.corner_posts > 0 { if s.posts_round { "_RoundPillars" } else { "_SquarePillars" } } else { "" };
         let rot = if s.turn == Turn::WallsAcross { "_90" } else { "" };
-        format!("Honeycomb_{}_{}{}{}{}", fmt_num(s.cell as f64 / 10.0), style, posts, rot, way).replace('.', "p")
+        format!("{}_{}_{}{}{}{}", s.pattern.short(), fmt_num(s.cell as f64 / 10.0), style, posts, rot, way).replace('.', "p")
     }
 
     /// Start a background build when the settings have changed (after a short pause).
@@ -265,13 +267,18 @@ impl App {
         }
     }
 
-    fn save_preset(&mut self) {
+    fn save_preset(&mut self, overwrite: bool) {
         let name: String = self.preset_name.trim().chars().map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c }).collect();
         if name.is_empty() {
             self.log(LogKind::Warn, "Type a name for the preset first.");
             return;
         }
         let Some(dir) = Self::preset_dir() else { return };
+        if !overwrite && dir.join(format!("{name}.txt")).exists() {
+            // Same name as a preset that's already saved: ask first.
+            self.confirm_preset = Some(name);
+            return;
+        }
         let text = format!("units={}\n{}", if self.units == Units::Studs { "studs" } else { "micro" }, self.s.to_text());
         match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(format!("{name}.txt")), text)) {
             Ok(()) => {
@@ -551,7 +558,7 @@ impl eframe::App for App {
                             }
                         });
                         if ui.button("Save preset").clicked() {
-                            self.save_preset();
+                            self.save_preset(false);
                         }
                         ui.add_sized([130.0, 22.0], egui::TextEdit::singleline(&mut self.preset_name).hint_text("preset name"));
                         ui.label(bold("Presets", 12.5).color(SOFT));
@@ -611,6 +618,29 @@ impl eframe::App for App {
                 self.log(LogKind::Info, "Not saved. Change the file name to keep both.");
             }
         }
+        if let Some(name) = self.confirm_preset.clone() {
+            let (mut close, mut go) = (false, false);
+            egui::Modal::new(egui::Id::new("overwrite_preset")).show(ctx, |ui| {
+                ui.label(RichText::new("Overwrite?").strong().size(16.0));
+                ui.label(format!("A preset called \"{name}\" already exists."));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Overwrite it").clicked() {
+                        go = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if go {
+                self.confirm_preset = None;
+                self.save_preset(true);
+            } else if close {
+                self.confirm_preset = None;
+                self.log(LogKind::Info, "Preset not saved. Change the name to keep both.");
+            }
+        }
         if self.waiting.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -631,10 +661,9 @@ impl App {
         card(ui, |ui| {
             ui.horizontal(|ui| {
                 label(ui, "Pattern", lw);
-                egui::ComboBox::from_id_salt("pattern").width(200.0).selected_text("Honeycomb").show_ui(ui, |ui| {
-                    let _ = ui.selectable_label(true, "Honeycomb");
-                    for p in ["Triangles", "Star of David", "Cube illusion", "Octagons and squares", "Diamond lattice"] {
-                        ui.add_enabled(false, egui::Button::selectable(false, format!("{p} (coming in stage 3)")));
+                egui::ComboBox::from_id_salt("pattern").width(200.0).selected_text(self.s.pattern.label()).show_ui(ui, |ui| {
+                    for p in Pattern::ALL {
+                        ui.selectable_value(&mut self.s.pattern, p, p.label());
                     }
                 });
             });
@@ -653,17 +682,18 @@ impl App {
                 let max_post = (self.s.cell / 4 / 2) * 2;
                 if self.s.corner_posts > max_post { self.s.corner_posts = max_post.max(2) }
             }
-            note(ui, lw + 8.0, "flat side to flat side");
+            note(ui, lw + 8.0, patterns::cell_meaning(self.s.pattern));
             let mut sh = self.s.stretch_h as i32;
             let mut sv = self.s.stretch_v as i32;
-            int_row(ui, "Stretch H", lw, &mut sh, 25, 400, "%  (stage 3)", false);
-            int_row(ui, "Stretch V", lw, &mut sv, 25, 400, "%  (stage 3)", false);
+            int_row(ui, "Stretch H", lw, &mut sh, 25, 400, "%  (coming in v0.3.1)", false);
+            int_row(ui, "Stretch V", lw, &mut sv, 25, 400, "%  (coming in v0.3.1)", false);
             let ents = match &self.built {
                 Some(Ok((b, _))) => b.entities.len() - b.posts_entity,
                 _ => 2,
             };
-            let angles = if self.s.turn == Turn::WallsAcross { "90° · 150° · 30°" } else { "0° · 60° · 120°" };
-            note(ui, lw + 8.0, format!("Angles {angles} → {ents} wall entities"));
+            let (main_a, ent_a) = patterns::pattern_angles(self.s.pattern, self.s.turn == Turn::WallsAcross);
+            let ea: Vec<String> = ent_a.iter().map(|a| format!("{}°", fmt_num(*a))).collect();
+            note(ui, lw + 8.0, format!("Main grid {main_a} · entities {} → {ents} wall entities", ea.join(" · ")));
         });
         ui.add_space(6.0);
 
@@ -753,13 +783,15 @@ impl App {
             if self.s.one_paint {
                 paint_rows(ui, lw, "Colour", &mut self.s.color, &mut self.s.material, &mut self.s.intensity, &mut self.hex, "all");
             } else {
-                let names = if self.s.turn == Turn::WallsAcross { ["Main grid (90°)", "Entity 1 (150°)", "Entity 2 (30°)", "Pillars", "Bearings"] } else { ["Main grid (0°)", "Entity 1 (60°)", "Entity 2 (120°)", "Pillars", "Bearings"] };
+                let (main_a, ent_a) = patterns::pattern_angles(self.s.pattern, self.s.turn == Turn::WallsAcross);
+                let ea = |i: usize| ent_a.get(i).map(|a| format!("{}°", fmt_num(*a))).unwrap_or_default();
+                let names = [format!("Main grid ({main_a})"), format!("Entity 1 ({})", ea(0)), format!("Entity 2 ({})", ea(1)), "Pillars".to_string(), "Bearings".to_string()];
                 for i in 0..5 {
                     if i == 3 && self.s.corner_posts == 0 {
                         continue;
                     }
                     let p = &mut self.s.paints[i];
-                    ui.label(bold(names[i], 12.5).color(SOFT));
+                    ui.label(bold(&names[i], 12.5).color(SOFT));
                     paint_rows(ui, lw, "Colour", &mut p.color, &mut p.material, &mut p.intensity, &mut self.part_hex[i], &format!("p{i}"));
                 }
             }
@@ -772,14 +804,18 @@ impl App {
                 label(ui, "Spokes", lw);
                 seg(ui, &mut self.s.spokes, &[(SpokeMode::None, "None"), (SpokeMode::EveryCell, "Every cell"), (SpokeMode::AltRows, "Alt. rows"), (SpokeMode::Custom, "Custom")]);
             });
-            let on = self.s.spokes != SpokeMode::None;
+            let fams = patterns::spoke_families(&self.s);
+            if fams.is_empty() {
+                note(ui, lw + 8.0, "This pattern has no spokes (its cells have no parallel opposite sides).");
+            }
+            let on = self.s.spokes != SpokeMode::None && !fams.is_empty();
             let custom = self.s.spokes == SpokeMode::Custom;
             ui.add_enabled_ui(on, |ui| {
                 ui.horizontal(|ui| {
                     label(ui, "Directions", lw);
-                    let names = if self.s.turn == Turn::WallsAcross { ["90°", "150°", "30°"] } else { ["0°", "60°", "120°"] };
-                    for k in 0..3 {
-                        ui.checkbox(&mut self.s.spoke_dirs[k], names[k]);
+                    for k in 0..3.min(fams.len()) {
+                        let name: Vec<String> = fams.iter().enumerate().filter(|(i, _)| i % 3 == k).map(|(_, a)| format!("{}°", fmt_num(*a))).collect();
+                        ui.checkbox(&mut self.s.spoke_dirs[k], name.join(" & "));
                     }
                 });
             });
@@ -797,7 +833,9 @@ impl App {
                     ui.checkbox(&mut self.s.spoke_stagger, "Stagger rows");
                 });
             });
-            note(ui, lw + 8.0, "2 cells, 2 rows, staggered = your original");
+            if self.s.pattern == Pattern::Honeycomb {
+                note(ui, lw + 8.0, "2 cells, 2 rows, staggered = your original");
+            }
             ui.add_enabled_ui(on, |ui| {
                 ui.horizontal(|ui| {
                     label(ui, "Length", lw);
