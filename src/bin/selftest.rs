@@ -11,9 +11,9 @@ fn main() {
                     for &turn in &[Turn::WallsUpright, Turn::WallsAcross] {
                         for &cell in &[10, 20, 30, 40] {
                             for &flip in &[false, true] {
-                                for &(top, posts, round, through, extra) in &[(false, 0, false, true, 0), (true, 0, false, true, 0), (false, 2, true, true, 4), (true, 4, false, false, -2), (false, 4, true, true, 0)] {
+                                for &(top, posts, round, through, extra, wt) in &[(false, 0, false, true, 0, 4), (true, 0, false, true, 0, 8), (false, 2, true, true, 4, 4), (true, 4, false, false, -2, 12), (false, 4, true, true, 0, 4), (false, 16, true, true, 0, 8), (true, 40, false, false, 0, 4)] {
                                     let s = Settings {
-                                        style, spokes, area, way_up, turn, cell, flip_wedges: flip, spoke_top: top, corner_posts: posts, posts_round: round, walls_through: through, posts_extra: extra, best_bearings: cell == 20 && flip,
+                                        style, spokes, area, way_up, turn, cell, flip_wedges: flip, spoke_top: top, corner_posts: posts, wedge_thickness: wt.min(cell / 2 / 4 * 4).max(4), posts_round: round, walls_through: through, posts_extra: extra, best_bearings: cell == 20 && flip,
                                         width: cell * 8, length: cell * 6,
                                         ..Settings::default()
                                     };
@@ -26,7 +26,7 @@ fn main() {
                                                 if true { println!("PROBLEM {:?} {:?} {:?} {:?} {:?} cell {} flip {} top {} posts {}: {}", style, spokes, area, way_up, turn, cell, flip, top, posts, p.join("; ")); }
                                             }
                                         }
-                                        Err(e) => { bad += 1; if bad < 15 { println!("ERROR {e}"); } }
+                                        Err(e) => { bad += 1; if bad < 400 { println!("ERROR {e} | {:?} {:?} {:?} {:?} {:?} cell {} top {} posts {} wt {}", style, spokes, area, way_up, turn, cell, top, posts, wt); } }
                                     }
                                 }
                             }
@@ -36,7 +36,12 @@ fn main() {
             }
         }
     }
-    for s in [Settings::default(), Settings { way_up: WayUp::UpsideDown, ..Settings::default() }] {
+    // Partial saves and per-part colours must write without errors.
+    for (m, e, b) in [(true, false, false), (false, true, false), (false, false, true), (false, true, true), (true, true, false)] {
+        let s = Settings { include_main: m, include_entities: e, include_bearings: b, one_paint: false, corner_posts: 30, ..Settings::default() };
+        if let Err(err) = to_brz_bytes(&s) { bad += 1; println!("PARTIAL {m} {e} {b}: {err}"); }
+    }
+    for s in [Settings::default(), Settings { way_up: WayUp::UpsideDown, ..Settings::default() }, Settings { turn: Turn::WallsAcross, corner_posts: 30, posts_extra: 4, ..Settings::default() }] {
         if let Err(e) = check::round_trip(&s) { bad += 1; println!("ROUND TRIP: {e}"); }
     }
     println!("{n} layouts built, {bad} problems");

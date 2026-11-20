@@ -1,6 +1,6 @@
 [package]
 name = "brz-pattern-generator"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Angled brick patterns for Brickadia, held on rigid bearings, saved as prefabs"
 license = "MIT"

@@ -72,6 +72,8 @@ struct App {
     preset_pick: usize,
     confirm_replace: Option<std::path::PathBuf>,
     cards_h: f32,
+    real_colours: bool,
+    part_hex: [String; 5],
 }
 
 impl App {
@@ -102,6 +104,8 @@ impl App {
             preset_pick: 0,
             confirm_replace: None,
             cards_h: 190.0,
+            real_colours: false,
+            part_hex: std::array::from_fn(|_| hex_of(Settings::default().color)),
         };
         a.refresh_presets();
         a
@@ -119,7 +123,8 @@ impl App {
         let style = if s.style == WallStyle::MicroWedge { "Wedge" } else { "Brick" };
         let way = if s.way_up == WayUp::UpsideDown { "_UpsideDown" } else { "" };
         let posts = if s.corner_posts > 0 { if s.posts_round { "_RoundPillars" } else { "_SquarePillars" } } else { "" };
-        format!("Honeycomb_{}_{}{}{}", fmt_num(s.cell as f64 / 10.0), style, posts, way).replace('.', "p")
+        let rot = if s.turn == Turn::WallsAcross { "_90" } else { "" };
+        format!("Honeycomb_{}_{}{}{}{}", fmt_num(s.cell as f64 / 10.0), style, posts, rot, way).replace('.', "p")
     }
 
     /// Start a background build when the settings have changed (after a short pause).
@@ -177,6 +182,9 @@ impl App {
         if !probs.is_empty() {
             self.log(LogKind::Err, format!("Self-check failed ({}). Nothing was saved. Please send these settings to Claude.", probs.join("; ")));
             return None;
+        }
+        if s.include_entities && !s.include_bearings {
+            self.log(LogKind::Warn, "Saved without bearings: the entities are frozen in place but nothing holds their angle if unfrozen.");
         }
         let n = built.brick_count();
         let e = built.entities.len();
@@ -285,6 +293,9 @@ impl App {
                 self.s = Settings::from_text(&t);
                 self.units = if t.contains("units=micro") { Units::Micro } else { Units::Studs };
                 self.hex = hex_of(self.s.color);
+                for i in 0..5 {
+                    self.part_hex[i] = hex_of(self.s.paints[i].color);
+                }
                 self.preset_name = name.clone();
                 self.log(LogKind::Ok, format!("Preset \"{name}\" loaded."));
             }
@@ -349,6 +360,37 @@ fn style_ui(ctx: &egui::Context) {
         s.spacing.slider_width = 110.0;
         s.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(13.5));
         s.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
+    });
+}
+
+/// Colour button + hex box, material, intensity.
+#[allow(clippy::too_many_arguments)]
+fn paint_rows(ui: &mut egui::Ui, lw: f32, name: &str, color: &mut [u8; 3], material: &mut usize, intensity: &mut u8, hex: &mut String, id: &str) {
+    ui.horizontal(|ui| {
+        label(ui, name, lw);
+        if egui::color_picker::color_edit_button_srgb(ui, color).changed() {
+            *hex = hex_of(*color);
+        }
+        if ui.add_sized([80.0, 22.0], egui::TextEdit::singleline(hex)).changed() {
+            let h = hex.trim().trim_start_matches('#');
+            if h.len() == 6 {
+                if let Ok(v) = u32::from_str_radix(h, 16) {
+                    *color = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
+                }
+            }
+        }
+        egui::ComboBox::from_id_salt(format!("mat{id}")).width(110.0).selected_text(MATERIALS[*material].0).show_ui(ui, |ui| {
+            for (i, (n, _)) in MATERIALS.iter().enumerate() {
+                ui.selectable_value(material, i, *n);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        label(ui, "Intensity", lw);
+        let mut i = *intensity as i32;
+        ui.add(egui::Slider::new(&mut i, 0..=10));
+        *intensity = i as u8;
+        ui.label(RichText::new("glow / shine").size(12.0).color(SOFT));
     });
 }
 
@@ -597,8 +639,8 @@ impl App {
                 });
             });
             ui.horizontal(|ui| {
-                label(ui, "Turn", lw);
-                seg(ui, &mut self.s.turn, &[(Turn::WallsUpright, "Walls upright"), (Turn::WallsAcross, "Walls across")]);
+                label(ui, "Rotation", lw);
+                seg(ui, &mut self.s.turn, &[(Turn::WallsUpright, "0°"), (Turn::WallsAcross, "90°")]);
             });
             ui.horizontal(|ui| {
                 label(ui, "Units", lw);
@@ -617,11 +659,11 @@ impl App {
             int_row(ui, "Stretch H", lw, &mut sh, 25, 400, "%  (stage 3)", false);
             int_row(ui, "Stretch V", lw, &mut sv, 25, 400, "%  (stage 3)", false);
             let ents = match &self.built {
-                Some(Ok((b, _))) => b.entities.len(),
-                _ => if self.s.turn == Turn::WallsAcross { 3 } else { 2 },
+                Some(Ok((b, _))) => b.entities.len() - b.posts_entity,
+                _ => 2,
             };
             let angles = if self.s.turn == Turn::WallsAcross { "90° · 150° · 30°" } else { "0° · 60° · 120°" };
-            note(ui, lw + 8.0, format!("Angles {angles} → {ents} entities"));
+            note(ui, lw + 8.0, format!("Angles {angles} → {ents} wall entities"));
         });
         ui.add_space(6.0);
 
@@ -637,10 +679,19 @@ impl App {
                 self.s.wall_height = h * 2;
             }
             let brick = self.s.style == WallStyle::MicroBrick;
-            let mut t = self.s.wall_thickness / 2;
-            let n = self.unit_note(t);
-            if size_row(ui, "Thickness", lw, &mut t, 1, 10, 50, u, &n, brick) {
-                self.s.wall_thickness = t * 2;
+            if brick {
+                let mut t = self.s.wall_thickness / 2;
+                let n = self.unit_note(t);
+                if size_row(ui, "Thickness", lw, &mut t, 1, 10, 50, u, &n, true) {
+                    self.s.wall_thickness = t * 2;
+                }
+            } else {
+                // two wedges side by side, each a whole micro brick: steps of 2 M
+                let mut t = self.s.wedge_thickness / 2;
+                let n = format!("{} · pair of wedges", self.unit_note(t));
+                if size_row(ui, "Thickness", lw, &mut t, 2, 12, 50, u, &n, true) {
+                    self.s.wedge_thickness = ((t + 1) / 2 * 2).max(2) * 2;
+                }
             }
             ui.add_enabled_ui(!brick, |ui| {
                 ui.horizontal(|ui| {
@@ -664,23 +715,31 @@ impl App {
                     seg(ui, &mut self.s.posts_round, &[(true, "Round (pole)"), (false, "Square")]);
                 });
                 let mut pw = (self.s.corner_posts / 2).max(1);
-                let maxw = (self.s.cell / 4 / 2).max(1);
                 let n = self.unit_note(pw);
-                if size_row(ui, "Width", lw, &mut pw, 1, maxw.max(2), maxw.max(1), u, &n, on) && on {
-                    self.s.corner_posts = pw.min(maxw) * 2;
+                if size_row(ui, "Width", lw, &mut pw, 1, 20, 1000, u, &n, on) && on {
+                    self.s.corner_posts = pw * 2;
+                }
+                if let Some(Ok((b, _))) = &self.built {
+                    if b.posts_entity > 0 {
+                        note(ui, lw + 8.0, format!("Too wide for the main grid: on {} own entit{} (+{} bearing{})", b.posts_entity, if b.posts_entity == 1 { "y" } else { "ies" }, b.posts_entity, if b.posts_entity == 1 { "" } else { "s" }));
+                    }
                 }
                 let mut ex = self.s.posts_extra / 2;
                 ui.horizontal(|ui| {
-                    label(ui, "Height", lw);
+                    label(ui, "Extra height", lw);
                     let mut f = ex as f64;
                     ui.allocate_ui_with_layout(Vec2::new(58.0, 22.0), egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
                         arrow_keys(ui, &mut f, 1.0, -(self.s.wall_height as f64 / 2.0 - 1.0), 60.0);
                         ui.add(egui::DragValue::new(&mut f).range(-(self.s.wall_height as f64 / 2.0 - 1.0)..=60.0).speed(0.1).max_decimals(0));
                     });
                     ex = f.round() as i32;
-                    ui.label(RichText::new("M taller (0 = level)").size(12.0).color(SOFT));
+                    ui.label(RichText::new("M taller than the walls (minus = shorter)").size(12.0).color(SOFT));
                 });
                 self.s.posts_extra = ex * 2;
+                ui.horizontal(|ui| {
+                    label(ui, "Sticks out", lw);
+                    seg(ui, &mut self.s.posts_centred, &[(true, "Top and bottom equally"), (false, "Top only")]);
+                });
                 ui.horizontal(|ui| {
                     label(ui, "Walls", lw);
                     seg(ui, &mut self.s.walls_through, &[(true, "Run through"), (false, "Stop at pillar")]);
@@ -688,35 +747,22 @@ impl App {
             });
             ui.separator();
             ui.horizontal(|ui| {
-                label(ui, "Colour", lw);
-                if egui::color_picker::color_edit_button_srgb(ui, &mut self.s.color).changed() {
-                    self.hex = hex_of(self.s.color);
-                }
-                let r = ui.add_sized([90.0, 22.0], egui::TextEdit::singleline(&mut self.hex));
-                if r.changed() {
-                    let h = self.hex.trim().trim_start_matches('#');
-                    if h.len() == 6 {
-                        if let Ok(v) = u32::from_str_radix(h, 16) {
-                            self.s.color = [(v >> 16) as u8, (v >> 8) as u8, v as u8];
-                        }
+                label(ui, "Colours", lw);
+                seg(ui, &mut self.s.one_paint, &[(true, "Same for all"), (false, "Each part")]);
+            });
+            if self.s.one_paint {
+                paint_rows(ui, lw, "Colour", &mut self.s.color, &mut self.s.material, &mut self.s.intensity, &mut self.hex, "all");
+            } else {
+                let names = if self.s.turn == Turn::WallsAcross { ["Main grid (90°)", "Entity 1 (150°)", "Entity 2 (30°)", "Pillars", "Bearings"] } else { ["Main grid (0°)", "Entity 1 (60°)", "Entity 2 (120°)", "Pillars", "Bearings"] };
+                for i in 0..5 {
+                    if i == 3 && self.s.corner_posts == 0 {
+                        continue;
                     }
+                    let p = &mut self.s.paints[i];
+                    ui.label(bold(names[i], 12.5).color(SOFT));
+                    paint_rows(ui, lw, "Colour", &mut p.color, &mut p.material, &mut p.intensity, &mut self.part_hex[i], &format!("p{i}"));
                 }
-            });
-            ui.horizontal(|ui| {
-                label(ui, "Material", lw);
-                egui::ComboBox::from_id_salt("material").width(150.0).selected_text(MATERIALS[self.s.material].0).show_ui(ui, |ui| {
-                    for (i, (n, _)) in MATERIALS.iter().enumerate() {
-                        ui.selectable_value(&mut self.s.material, i, *n);
-                    }
-                });
-            });
-            ui.horizontal(|ui| {
-                label(ui, "Intensity", lw);
-                let mut i = self.s.intensity as i32;
-                ui.add(egui::Slider::new(&mut i, 0..=10));
-                self.s.intensity = i as u8;
-                ui.label(RichText::new("glow / shine").size(12.0).color(SOFT));
-            });
+            }
         });
         ui.add_space(6.0);
 
@@ -788,7 +834,7 @@ impl App {
     fn right_side(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
         let stats_h = 58.0;
-        let out_h = 40.0;
+        let out_h = 72.0;
         let tool_h = 30.0;
         let prev_h = (avail.y - tool_h - stats_h - self.cards_h - out_h - 4.0 * 8.0).max(220.0);
 
@@ -800,7 +846,9 @@ impl App {
             }
             ui.label(RichText::new("Zoom").color(SOFT));
             ui.add(egui::Slider::new(&mut self.zoom, 1.0..=12.0).logarithmic(true).show_value(false));
-            ui.add_space(10.0);
+            ui.add_space(6.0);
+            seg(ui, &mut self.real_colours, &[(false, "Grid colours"), (true, "Real colours")]);
+            ui.add_space(6.0);
             for t in ["Paint cells", "Fill", "Clear", "Undo"] {
                 ui.add_enabled(false, egui::Button::new(t)).on_disabled_hover_text("Paint mode arrives in stage 3");
             }
@@ -850,6 +898,19 @@ impl App {
                 lx -= 12.0;
             }
             let painter = painter.with_clip_rect(r.shrink(2.0));
+            let real = self.real_colours;
+            let bs = self.built_settings.clone();
+            let eparts = match &self.built { Some(Ok((b, _))) => entity_parts(b), _ => Vec::new() };
+            let paint_col = |grid: usize, k: FootKind| -> Color32 {
+                let part = match k {
+                    FootKind::Pillar => 3,
+                    FootKind::Bearing => 4,
+                    _ => if grid == 0 { 0 } else { *eparts.get(grid - 1).unwrap_or(&1) },
+                };
+                let c = bs.paint(part).color;
+                let col = Color32::from_rgb(c[0], c[1], c[2]);
+                if k == FootKind::Spoke { col.gamma_multiply(0.75) } else { col }
+            };
             match &self.built {
                 Some(Ok((_, feet))) => {
                     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -873,12 +934,12 @@ impl App {
                                 (FootKind::Wall, 0) | (FootKind::Spoke, 1) | (FootKind::Pillar, 2) | (FootKind::Bearing, 3) => f.kind,
                                 _ => continue,
                             };
-                            let col = match k {
+                            let col = if real { paint_col(f.grid, k) } else { match k {
                                 FootKind::Wall => GRID_COL[f.grid.min(3)],
                                 FootKind::Spoke => SPOKE_COL[f.grid.min(3)],
                                 FootKind::Pillar => PILLAR_COL,
                                 FootKind::Bearing => BEARING_COL,
-                            };
+                            } };
                             let pts: Vec<Pos2> = f.pts.iter().map(|p| to(*p)).collect();
                             if k == FootKind::Pillar && self.built_settings.posts_round {
                                 let mid = Pos2::new((pts[0].x + pts[2].x) / 2.0, (pts[0].y + pts[2].y) / 2.0);
@@ -971,6 +1032,20 @@ impl App {
         }
         let _ = idx;
         self.cards_h = (ui.cursor().top() - top).max(80.0);
+
+        // ---- what to include ----
+        ui.horizontal(|ui| {
+            ui.label(bold("Include", 12.5).color(SOFT));
+            ui.checkbox(&mut self.s.include_main, "Main grid bricks");
+            ui.checkbox(&mut self.s.include_entities, "Entities");
+            ui.checkbox(&mut self.s.include_bearings, "Bearings");
+            if self.s.include_entities && !self.s.include_bearings {
+                ui.label(RichText::new("⚠ Entities won't be held by bearings: they stay put only while frozen.").size(12.0).color(WARN));
+            } else if !(self.s.include_main || self.s.include_entities || self.s.include_bearings) {
+                ui.label(RichText::new("⚠ Nothing ticked: nothing to save.").size(12.0).color(WARN));
+            }
+        });
+        ui.add_space(4.0);
 
         // ---- output ----
         let ok = matches!(self.built, Some(Ok(_))) && self.waiting.is_none();

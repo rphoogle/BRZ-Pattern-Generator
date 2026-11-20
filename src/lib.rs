@@ -54,8 +54,10 @@ pub struct Settings {
     pub turn: Turn,
     pub style: WallStyle,
     pub wall_height: i32,
-    /// Micro brick style only.
+    /// Micro brick style.
     pub wall_thickness: i32,
+    /// Micro wedge style: thickness of the wedge pair (each wedge is half), multiple of 4 units.
+    pub wedge_thickness: i32,
     /// Use the half-turned version of every piece (wedge slopes face the other way).
     pub flip_wedges: bool,
     pub spokes: SpokeMode,
@@ -86,6 +88,26 @@ pub struct Settings {
     pub color: [u8; 3],
     pub material: usize,
     pub intensity: u8,
+    /// One colour for everything (the three fields above). Off: `paints` per part.
+    pub one_paint: bool,
+    pub paints: [Paint; 5],
+    /// Pillars stick out equally above and below the walls (else all extra height goes on top).
+    pub posts_centred: bool,
+    /// What to save / copy.
+    pub include_main: bool,
+    pub include_entities: bool,
+    pub include_bearings: bool,
+}
+
+impl Settings {
+    /// Paint for a part (0 main grid, 1-2 entities, 3 pillars, 4 bearings).
+    pub fn paint(&self, part: usize) -> Paint {
+        if self.one_paint {
+            Paint { color: self.color, material: self.material, intensity: self.intensity }
+        } else {
+            self.paints[part.min(4)]
+        }
+    }
 }
 
 impl Default for Settings {
@@ -99,6 +121,7 @@ impl Default for Settings {
             style: WallStyle::MicroWedge,
             wall_height: 30,
             wall_thickness: 2,
+            wedge_thickness: 4,
             flip_wedges: false,
             spokes: SpokeMode::Custom,
             spoke_dirs: [true; 3],
@@ -121,6 +144,12 @@ impl Default for Settings {
             color: [0xDB, 0xBE, 0xC0],
             material: 0,
             intensity: 0,
+            one_paint: true,
+            paints: [Paint { color: [0xDB, 0xBE, 0xC0], material: 0, intensity: 0 }; 5],
+            posts_centred: true,
+            include_main: true,
+            include_entities: true,
+            include_bearings: true,
         }
     }
 }
@@ -128,10 +157,23 @@ impl Default for Settings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind { Micro, Wedge, Pole }
 
+/// Colour, material and intensity for one part of the build.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Paint {
+    pub color: [u8; 3],
+    pub material: usize,
+    pub intensity: u8,
+}
+
+/// The parts that can have their own paint.
+pub const PARTS: [&str; 5] = ["Main grid", "Entity 1", "Entity 2", "Pillars", "Bearings"];
+
 /// One brick before it is placed in a grid: size, local position, orientation byte.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct B {
     pub kind: Kind,
+    /// Part of a corner pillar (for its own colour).
+    pub pillar: bool,
     pub size: (i32, i32, i32),
     pub pos: (i32, i32, i32),
     /// direction * 4 + rotation (as in the save file).
@@ -150,6 +192,8 @@ pub struct Grid {
     /// Bearing angle (degrees).
     pub angle: f64,
     pub max_move: f64,
+    /// This entity holds pillars (not walls).
+    pub pillars: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +206,8 @@ pub struct Built {
     /// How far wall ends miss at corners (units): average and worst.
     pub corner_mean: f64,
     pub corner_worst: f64,
+    /// Pillars were too wide for the main grid: how many entities hold them (0 = on the main grid).
+    pub posts_entity: usize,
 }
 
 impl Built {
@@ -193,6 +239,22 @@ fn rot180(b: B) -> B {
     B { pos: (-b.pos.0, -b.pos.1, b.pos.2), ori, ..b }
 }
 
+/// Quarter turn (anticlockwise from above) about the vertical axis. Worked out
+/// from the user's two piece layouts: the facing direction turns, the rotation
+/// number stays (box-shaped bricks just swap their sideways sizes).
+fn rot90(b: B) -> B {
+    let dir = b.ori >> 2;
+    let rot = b.ori & 3;
+    let ori = match dir {
+        0 => (2 << 2) | rot,
+        2 => (1 << 2) | rot,
+        1 => (3 << 2) | rot,
+        3 => rot,
+        _ => (dir << 2) | ((rot + 1) & 3),
+    };
+    B { pos: (-b.pos.1, b.pos.0, b.pos.2), ori, ..b }
+}
+
 /// Upside down: half turn about the X axis (matches the user's upside-down honeycomb).
 fn flip_x(b: B) -> B {
     let dir = b.ori >> 2;
@@ -214,12 +276,13 @@ fn wall(s: &Settings, cx: i32, cy: i32, zb: i32, lh: i32, plus: bool, out: &mut 
     let zc = zb + hh;
     match s.style {
         WallStyle::MicroWedge => {
-            let (a, b) = if plus { ((cx + 1, 8u8), (cx - 1, 11u8)) } else { ((cx - 1, 12u8), (cx + 1, 15u8)) };
-            out.push(B { kind: Kind::Wedge, size: (hh, 1, lh), pos: (a.0, cy, zc), ori: a.1 });
-            out.push(B { kind: Kind::Wedge, size: (1, hh, lh), pos: (b.0, cy, zc), ori: b.1 });
+            let hw = (s.wedge_thickness / 4).max(1);
+            let (a, b) = if plus { ((cx + hw, 8u8), (cx - hw, 11u8)) } else { ((cx - hw, 12u8), (cx + hw, 15u8)) };
+            out.push(B { pillar: false, kind: Kind::Wedge, size: (hh, hw, lh), pos: (a.0, cy, zc), ori: a.1 });
+            out.push(B { pillar: false, kind: Kind::Wedge, size: (hw, hh, lh), pos: (b.0, cy, zc), ori: b.1 });
         }
         WallStyle::MicroBrick => {
-            out.push(B { kind: Kind::Micro, size: (s.wall_thickness / 2, lh, hh), pos: (cx, cy, zc), ori: 16 });
+            out.push(B { pillar: false, kind: Kind::Micro, size: (s.wall_thickness / 2, lh, hh), pos: (cx, cy, zc), ori: 16 });
         }
     }
 }
@@ -266,7 +329,7 @@ fn spoke_brick(s: &Settings, g: &Geo, trim_fwd: bool, trim_back: bool) -> B {
     }
     let cx = (fwd - back) / 2;
     // size (t, half, t) with rotation 3 runs along local X (as in the user's file).
-    B { kind: Kind::Micro, size: (t, total / 2, t), pos: (cx, 0, z), ori: 19 }
+    B { pillar: false, kind: Kind::Micro, size: (t, total / 2, t), pos: (cx, 0, z), ori: 19 }
 }
 
 // ---------- honeycomb geometry ----------
@@ -281,8 +344,6 @@ struct Geo {
     side_x: i32,
     leg_y: i32,
     wall_half: i32,
-    /// Entity walls: full length when they run through the pillars.
-    ent_wall_half: i32,
     across: bool,
 }
 
@@ -295,8 +356,7 @@ fn geo(s: &Settings) -> Geo {
         row: 1.5 * side * s.stretch_v / 100.0,
         side_x: s.cell / 2,
         leg_y: (1.5 * side).round() as i32,
-        wall_half: ((side / 2.0).round() as i32 - s.corner_posts / 2).max(1),
-        ent_wall_half: if s.walls_through { ((side / 2.0).round() as i32).max(1) } else { ((side / 2.0).round() as i32 - s.corner_posts / 2).max(1) },
+        wall_half: ((side / 2.0).round() as i32).max(1),
         across: s.turn == Turn::WallsAcross,
     }
 }
@@ -415,8 +475,15 @@ pub fn validate(s: &Settings) -> Result<(), String> {
     if s.posts_extra % 2 != 0 || s.wall_height + s.posts_extra < 2 {
         return Err("Pillar height must be a whole number of micro bricks and at least 1 tall".into());
     }
-    if s.corner_posts < 0 || s.corner_posts % 2 != 0 || s.corner_posts > s.cell / 2 {
-        return Err("Corner posts must be a whole number of micro bricks, at most a quarter of the cell".into());
+    if s.corner_posts < 0 || s.corner_posts % 2 != 0 || s.corner_posts > 2000 {
+        return Err("Pillar width must be a whole number of micro bricks".into());
+    }
+    if s.wedge_thickness < 4 || s.wedge_thickness % 4 != 0 {
+        return Err("Wedge wall thickness must be a whole number of wedge pairs (2, 4, 6 ... micro)".into());
+    }
+    let thick = if s.style == WallStyle::MicroWedge { s.wedge_thickness } else { s.wall_thickness };
+    if thick * 2 > s.cell {
+        return Err("Walls are too thick for this cell size (at most half the cell)".into());
     }
     if s.cell < 8 {
         return Err("Cell size must be at least 4 micro bricks".into());
@@ -504,36 +571,18 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         return Err("The area is too small for one cell".into());
     }
 
-    // Main grid: pieces whose direction is 0° (only when walls are upright).
-    let main_k: Option<usize> = if s.turn == Turn::WallsUpright { Some(0) } else { None };
-    let mut main: Vec<B> = Vec::new();
-    let walls_main = piece_walls(s, &g, g.wall_half);
-    let walls_ent = piece_walls(s, &g, g.ent_wall_half);
-    let mut main_move: f64 = 0.0;
-    let piece_bricks = |walls: bool, spoke: bool, tf: bool, tb: bool, on_main: bool| -> Vec<B> {
-        let mut v = Vec::new();
-        if walls {
-            v.extend(if on_main { walls_main.iter() } else { walls_ent.iter() }.copied());
+    // Main grid: pieces whose direction is 0° (or 90° when the pattern is turned).
+    let main_k: Option<usize> = Some(0);
+    let across = s.turn == Turn::WallsAcross;
+    let to_main = |mut b: B| -> B {
+        if upside {
+            b = flip_x(b);
         }
-        if spoke {
-            v.push(spoke_brick(s, &g, tf, tb));
+        if across {
+            b = rot90(b);
         }
-        v
+        b
     };
-    for &(k, x, y, w, sp, tf, tb) in &pieces {
-        if Some(k) != main_k {
-            continue;
-        }
-        let (cx, cy) = (x.round() as i32, y.round() as i32);
-        main_move = main_move.max((x - cx as f64).hypot(y - cy as f64));
-        for mut b in piece_bricks(w, sp, tf, tb, true) {
-            if upside {
-                b = flip_x(b);
-            }
-            b.pos = (b.pos.0 + cx, b.pos.1 + cy, b.pos.2);
-            main.push(b);
-        }
-    }
 
     // Ideal corners: which pieces' walls meet at each corner.
     let ends_local = |g: &Geo| -> Vec<(f64, f64)> {
@@ -553,43 +602,163 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         }
     }
 
-    // Corner posts on the main grid.
-    if s.corner_posts > 0 {
-        let ph = s.corner_posts / 2;
-        let hh = s.wall_height / 2 + s.posts_extra / 2;
-        let zc = wall_base(s) + hh;
-        let kind = if s.posts_round { Kind::Pole } else { Kind::Micro };
-        let mut posts: Vec<(i32, i32)> = Vec::new();
-        if let Some(mk) = main_k {
-            // Next to the end of each main-grid wall (all main walls run along Y here).
-            for &(k, x, y, w, ..) in &pieces {
-                if k != mk || !w {
-                    continue;
+    // Pillars: on the main grid while they fit; otherwise on their own entity.
+    let ph = s.corner_posts / 2;
+    let full_half = g.wall_half;
+    let short_half = full_half - ph;
+    let mut posts_entity = false;
+    let mut posts: Vec<(i32, i32)> = Vec::new();
+    let main_post_spots = |half: i32| -> Vec<(i32, i32)> {
+        let mut v = Vec::new();
+        for &(k, x, y, w, ..) in &pieces {
+            if Some(k) != main_k || !w {
+                continue;
+            }
+            let (cx, cy) = (x.round() as i32, y.round() as i32);
+            for (wx, wy) in [(g.side_x, 0), (-g.side_x, 0), (0, g.leg_y), (0, -g.leg_y)] {
+                for sgn in [1, -1] {
+                    let (lx, ly) = (wx, wy + sgn * (half + ph));
+                    let (lx, ly) = if upside { (lx, -ly) } else { (lx, ly) };
+                    let (lx, ly) = if across { (-ly, lx) } else { (lx, ly) };
+                    v.push((cx + lx, cy + ly));
                 }
-                let (cx, cy) = (x.round() as i32, y.round() as i32);
-                for (wx, wy) in [(g.side_x, 0), (-g.side_x, 0), (0, g.leg_y), (0, -g.leg_y)] {
-                    for sgn in [1, -1] {
-                        posts.push((cx + wx, cy + wy + sgn * (g.wall_half + ph)));
+            }
+        }
+        v
+    };
+    let ideal_corner_spots = |near: &Vec<(i32, i32)>| -> Vec<(i32, i32)> {
+        let mut v = Vec::new();
+        for key in corners.keys() {
+            let (vx, vy) = ((key.0 as f64 / 20.0).round() as i32, (key.1 as f64 / 20.0).round() as i32);
+            if !near.iter().any(|(px, py)| (px - vx).abs() <= 2 * ph + 1 && (py - vy).abs() <= 2 * ph + 1) {
+                v.push((vx, vy));
+            }
+        }
+        v
+    };
+    if s.corner_posts > 0 {
+        let fits = short_half >= 1 && {
+            let mut p = main_post_spots(short_half);
+            let extra = ideal_corner_spots(&p);
+            p.extend(extra);
+            p.sort();
+            p.dedup();
+            let mut ok = true;
+            'outer: for i in 0..p.len() {
+                for j in i + 1..p.len() {
+                    if p[j].0 - p[i].0 >= 2 * ph {
+                        break;
+                    }
+                    if (p[j].1 - p[i].1).abs() < 2 * ph {
+                        ok = false;
+                        break 'outer;
                     }
                 }
             }
+            if ok {
+                posts = p;
+            }
+            ok
+        };
+        if !fits {
+            posts_entity = true;
+            posts = ideal_corner_spots(&Vec::new());
+            posts.sort();
+            posts.dedup();
         }
-        for key in corners.keys() {
-            let (vx, vy) = ((key.0 as f64 / 20.0).round() as i32, (key.1 as f64 / 20.0).round() as i32);
-            if !posts.iter().any(|(px, py)| (px - vx).abs() < 2 * ph + 2 && (py - vy).abs() < 2 * ph + 2) {
-                posts.push((vx, vy));
+    }
+    // Pillars that would overlap must go on different entities. Share them out
+    // with as few entities as possible: always place the most-crowded pillar next
+    // (the "DSatur" method).
+    let mut post_group: Vec<usize> = Vec::new();
+    let mut post_groups = 0usize;
+    if posts_entity {
+        let n = posts.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| posts[i]);
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for oi in 0..n {
+            let i = order[oi];
+            for &j in &order[oi + 1..] {
+                if posts[j].0 - posts[i].0 >= 2 * ph {
+                    break;
+                }
+                if (posts[j].1 - posts[i].1).abs() < 2 * ph {
+                    adj[i].push(j);
+                    adj[j].push(i);
+                }
             }
         }
-        posts.sort();
-        posts.dedup();
-        for (px, py) in posts {
-            let (z, ori) = if upside { (-zc, 20u8) } else { (zc, 16u8) };
-            main.push(B { kind, size: (ph, ph, hh), pos: (px, py, z), ori });
+        post_group = vec![usize::MAX; n];
+        let mut seen: Vec<std::collections::HashSet<usize>> = vec![std::collections::HashSet::new(); n];
+        for _ in 0..n {
+            let mut best = usize::MAX;
+            for i in 0..n {
+                if post_group[i] != usize::MAX {
+                    continue;
+                }
+                if best == usize::MAX || (seen[i].len(), adj[i].len()) > (seen[best].len(), adj[best].len()) {
+                    best = i;
+                }
+            }
+            let mut c = 0;
+            while seen[best].contains(&c) {
+                c += 1;
+            }
+            post_group[best] = c;
+            post_groups = post_groups.max(c + 1);
+            for &j in &adj[best] {
+                seen[j].insert(c);
+            }
+        }
+    }
+    let stop_half = short_half.max(1);
+    let main_half = if s.corner_posts > 0 && (!posts_entity || !s.walls_through) { stop_half } else { full_half };
+    let ent_half = if s.corner_posts > 0 && !s.walls_through { stop_half } else { full_half };
+
+    let mut main: Vec<B> = Vec::new();
+    let walls_main = piece_walls(s, &g, main_half);
+    let walls_ent = piece_walls(s, &g, ent_half);
+    let mut main_move: f64 = 0.0;
+    let piece_bricks = |walls: bool, spoke: bool, tf: bool, tb: bool, on_main: bool| -> Vec<B> {
+        let mut v = Vec::new();
+        if walls {
+            v.extend(if on_main { walls_main.iter() } else { walls_ent.iter() }.copied());
+        }
+        if spoke {
+            v.push(spoke_brick(s, &g, tf, tb));
+        }
+        v
+    };
+    for &(k, x, y, w, sp, tf, tb) in &pieces {
+        if Some(k) != main_k {
+            continue;
+        }
+        let (cx, cy) = (x.round() as i32, y.round() as i32);
+        main_move = main_move.max((x - cx as f64).hypot(y - cy as f64));
+        for b in piece_bricks(w, sp, tf, tb, true) {
+            let mut b = to_main(b);
+            b.pos = (b.pos.0 + cx, b.pos.1 + cy, b.pos.2);
+            main.push(b);
+        }
+    }
+
+    let post_hh = s.wall_height / 2 + s.posts_extra / 2;
+    // Centred: the pillar's middle lines up with the walls' middle, so any extra
+    // height sticks out equally above and below. Otherwise it all goes on top.
+    let post_zc = if s.posts_centred { wall_base(s) + s.wall_height / 2 } else { wall_base(s) + post_hh };
+    let post_kind = if s.posts_round { Kind::Pole } else { Kind::Micro };
+    if s.corner_posts > 0 && !posts_entity {
+        for &(px, py) in &posts {
+            let (z, ori) = if upside { (-post_zc, 20u8) } else { (post_zc, 16u8) };
+            main.push(B { pillar: true, kind: post_kind, size: (ph, ph, post_hh), pos: (px, py, z), ori });
         }
     }
 
     // Base-layer footprint of everything, for finding free bearing spots.
     let mut taken: Vec<((f64, f64), (f64, f64))> = Vec::new();
+    // The first `hard` entries are main-grid bricks (a bearing may never overlap
+    // those); the rest are entity bricks, which a bearing may sit inside if it must.
     let base_band = |b: &B| -> bool {
         let h = half(b);
         let z0 = b.pos.2 - h.2;
@@ -602,6 +771,8 @@ pub fn build(s: &Settings) -> Result<Built, String> {
             taken.push((((b.pos.0 - h.0) as f64, (b.pos.1 - h.1) as f64), ((b.pos.0 + h.0) as f64, (b.pos.1 + h.1) as f64)));
         }
     }
+    let hard = taken.len();
+
     for &(k, x, y, w, sp, tf, tb) in &pieces {
         if Some(k) == main_k {
             continue;
@@ -619,6 +790,12 @@ pub fn build(s: &Settings) -> Result<Built, String> {
             let e0 = m[0][0].abs() * h.0 as f64 + m[0][1].abs() * h.1 as f64 + 0.7;
             let e1 = m[1][0].abs() * h.0 as f64 + m[1][1].abs() * h.1 as f64 + 0.7;
             taken.push(((x + c.0 - e0, y + c.1 - e1), (x + c.0 + e0, y + c.1 + e1)));
+        }
+    }
+
+    if posts_entity && post_zc - post_hh < 2 {
+        for &(px, py) in &posts {
+            taken.push((((px - ph) as f64 - 0.1, (py - ph) as f64 - 0.1), ((px + ph) as f64 + 0.1, (py + ph) as f64 + 0.1)));
         }
     }
 
@@ -668,37 +845,50 @@ pub fn build(s: &Settings) -> Result<Built, String> {
     };
 
     // Free bearing spots, nearest the middle first.
-    let free = |bx: i32, by: i32, others: &[(i32, i32)]| -> bool {
+    let mut use_soft = true;
+    let free_with = |soft: bool, bx: i32, by: i32, others: &[(i32, i32)]| -> bool {
         let lo = ((bx - 1) as f64, (by - 1) as f64);
         let hi = ((bx + 1) as f64, (by + 1) as f64);
-        !taken.iter().any(|(a, b)| hi.0 > a.0 && lo.0 < b.0 && hi.1 > a.1 && lo.1 < b.1)
+        let list = if soft { &taken[..] } else { &taken[..hard] };
+        !list.iter().any(|(a, b)| hi.0 > a.0 && lo.0 < b.0 && hi.1 > a.1 && lo.1 < b.1)
             && !others.iter().any(|(ox, oy)| (ox - bx).abs() < 3 && (oy - by).abs() < 3)
     };
-    let mut spots: Vec<(i32, i32)> = Vec::new();
     // Fewer candidate spots on very large patterns, so building stays quick.
-    let limit = if s.best_bearings { (3_000_000 / corners.len().max(1)).clamp(150, 2500) } else { 50 };
-    'search: for rad in 0..200i32 {
-        for dx in -rad..=rad {
-            for dy in -rad..=rad {
-                if dx.abs() != rad && dy.abs() != rad {
-                    continue;
-                }
-                let (bx, by) = (mx.round() as i32 + dx, my.round() as i32 + dy);
-                if free(bx, by, &[]) {
-                    spots.push((bx, by));
-                    if spots.len() >= limit {
-                        break 'search;
+    let need = ent_ks.len() + post_groups;
+    let limit = (if s.best_bearings { (3_000_000 / corners.len().max(1)).clamp(150, 2500) } else { 50 }).max(need * 20);
+    let find_spots = |soft: bool| -> Vec<(i32, i32)> {
+        let mut spots: Vec<(i32, i32)> = Vec::new();
+        'search: for rad in 0..200i32 {
+            for dx in -rad..=rad {
+                for dy in -rad..=rad {
+                    if dx.abs() != rad && dy.abs() != rad {
+                        continue;
+                    }
+                    let (bx, by) = (mx.round() as i32 + dx, my.round() as i32 + dy);
+                    if free_with(soft, bx, by, &[]) {
+                        spots.push((bx, by));
+                        if spots.len() >= limit {
+                            break 'search;
+                        }
                     }
                 }
             }
         }
+        spots
+    };
+    let mut spots = find_spots(true);
+    if spots.len() < need * 10 {
+        // Nowhere clear: let bearings sit inside entity bricks (never main-grid ones).
+        use_soft = false;
+        spots = find_spots(false);
     }
+    let free = |bx: i32, by: i32, others: &[(i32, i32)]| free_with(use_soft, bx, by, others);
     if spots.is_empty() {
         return Err("No free spot for a bearing".into());
     }
     // Start with the nearest free spots, then (if asked) improve one entity at a time.
     let mut chosen: Vec<(i32, i32)> = Vec::new();
-    for _ in &ent_ks {
+    for _ in 0..ent_ks.len() + post_groups {
         let pick = *spots.iter().find(|p| free(p.0, p.1, &chosen)).ok_or("No free spot for a bearing")?;
         chosen.push(pick);
     }
@@ -766,26 +956,52 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         }
         max_move = max_move.max(mv);
         let angle = if upside { norm(yaw - 180.0) } else { norm(-yaw) };
-        entities.push(Grid { yaw: Some(yaw), bricks, origin, bearing: (bx, by, bz), angle, max_move: mv });
+        entities.push(Grid { yaw: Some(yaw), bricks, origin, bearing: (bx, by, bz), angle, max_move: mv, pillars: false });
+    }
+    for gi in 0..post_groups {
+        // Pillars on their own entity at 0°: whole-unit positions, so no rounding.
+        let (bx, by) = chosen[ent_ks.len() + gi];
+        let origin = (bx, by, 0);
+        let bricks = posts
+            .iter()
+            .zip(post_group.iter())
+            .filter(|(_, g)| **g == gi)
+            .map(|(&(px, py), _)| {
+                let ly = if upside { -(py - by) } else { py - by };
+                B { pillar: true, kind: post_kind, size: (ph, ph, post_hh), pos: (px - bx, ly, post_zc), ori: 16 }
+            })
+            .collect();
+        let angle = if upside { 180.0 } else { 0.0 };
+        entities.push(Grid { yaw: Some(0.0), bricks, origin, bearing: (bx, by, if upside { -1 } else { 1 }), angle, max_move: 0.0, pillars: true });
     }
     let angles = (0..3).map(|k| norm(dirs[k]).rem_euclid(180.0)).collect();
-    Ok(Built { main, entities, cells, max_move, angles, corner_mean: mean_corner, corner_worst: worst_corner })
+    Ok(Built { main, entities, cells, max_move, angles, corner_mean: mean_corner, corner_worst: worst_corner, posts_entity: post_groups })
 }
 
 /// World-space bounding box of everything (entities as turned boxes).
 pub fn world_bounds(built: &Built, upside: bool) -> ((f64, f64, f64), (f64, f64, f64)) {
+    world_bounds_parts(built, upside, true, true, true)
+}
+
+/// Bounding box of only the chosen parts.
+pub fn world_bounds_parts(built: &Built, upside: bool, main: bool, ents: bool, bears: bool) -> ((f64, f64, f64), (f64, f64, f64)) {
     let mut lo = (f64::MAX, f64::MAX, f64::MAX);
     let mut hi = (f64::MIN, f64::MIN, f64::MIN);
     let mut add = |c: (f64, f64, f64), e: (f64, f64, f64)| {
         lo = (lo.0.min(c.0 - e.0), lo.1.min(c.1 - e.1), lo.2.min(c.2 - e.2));
         hi = (hi.0.max(c.0 + e.0), hi.1.max(c.1 + e.1), hi.2.max(c.2 + e.2));
     };
-    for b in &built.main {
+    for b in built.main.iter().filter(|_| main) {
         let h = half(b);
         add((b.pos.0 as f64, b.pos.1 as f64, b.pos.2 as f64), (h.0 as f64, h.1 as f64, h.2 as f64));
     }
     for g in &built.entities {
-        add((g.bearing.0 as f64, g.bearing.1 as f64, g.bearing.2 as f64), (1.0, 1.0, 1.0));
+        if bears {
+            add((g.bearing.0 as f64, g.bearing.1 as f64, g.bearing.2 as f64), (1.0, 1.0, 1.0));
+        }
+        if !ents {
+            continue;
+        }
         let m = ent_matrix(g.yaw.unwrap(), upside);
         for b in &g.bricks {
             let h = half(b);
@@ -801,7 +1017,7 @@ pub fn world_bounds(built: &Built, upside: bool) -> ((f64, f64, f64), (f64, f64,
     (lo, hi)
 }
 
-fn to_brick(s: &Settings, b: &B) -> Brick {
+fn to_brick(p: Paint, b: &B) -> Brick {
     let dir = [Direction::XPositive, Direction::XNegative, Direction::YPositive, Direction::YNegative, Direction::ZPositive, Direction::ZNegative][(b.ori >> 2) as usize];
     let rot = [Rotation::Deg0, Rotation::Deg90, Rotation::Deg180, Rotation::Deg270][(b.ori & 3) as usize];
     Brick {
@@ -812,48 +1028,69 @@ fn to_brick(s: &Settings, b: &B) -> Brick {
         position: (b.pos.0, b.pos.1, b.pos.2).into(),
         direction: dir,
         rotation: rot,
-        color: (s.color[0], s.color[1], s.color[2]).into(),
-        material: brdb::BString::from(MATERIALS[s.material].1.to_string()),
-        material_intensity: s.intensity,
+        color: (p.color[0], p.color[1], p.color[2]).into(),
+        material: brdb::BString::from(MATERIALS[p.material].1.to_string()),
+        material_intensity: p.intensity,
         ..Default::default()
     }
 }
 
+/// Which paint each entity uses: wall entities take Entity 1, Entity 2 in
+/// order; pillar entities take Pillars.
+pub fn entity_parts(built: &Built) -> Vec<usize> {
+    let mut n = 0;
+    built.entities.iter().map(|g| if g.pillars { 3 } else { n += 1; n.min(2) }).collect()
+}
+
 /// Build the prefab world: main grid, entities, bearings and joints, centred.
+/// Only the parts ticked in the settings are included.
 pub fn to_world(s: &Settings, built: &Built) -> World {
     let upside = s.way_up == WayUp::UpsideDown;
-    let (lo, hi) = world_bounds(built, upside);
+    let (inc_m, inc_e, inc_b) = (s.include_main, s.include_entities, s.include_bearings);
+    let (lo, hi) = world_bounds_parts(built, upside, inc_m, inc_e, inc_b);
     // Centre on whole units, like the game's own copies.
     let c = (((lo.0 + hi.0) / 2.0).round() as i32, ((lo.1 + hi.1) / 2.0).round() as i32, ((lo.2 + hi.2) / 2.0).round() as i32);
     let mut w = World::new();
     w.register_all_components();
-    for b in &built.main {
-        let mut br = to_brick(s, b);
-        br.position = Position::new(b.pos.0 - c.0, b.pos.1 - c.1, b.pos.2 - c.2);
-        w.add_brick(br);
-    }
-    for g in &built.entities {
-        let (bearing, bearing_id) = Brick {
-            asset: BrickType::Basic(brdb::BString::str(BEARING)),
-            position: Position::new(g.bearing.0 - c.0, g.bearing.1 - c.1, g.bearing.2 - c.2),
-            direction: if upside { Direction::ZNegative } else { Direction::ZPositive },
-            rotation: Rotation::Deg0,
-            color: (s.color[0], s.color[1], s.color[2]).into(),
-            material: brdb::BString::from(MATERIALS[s.material].1.to_string()),
-            material_intensity: s.intensity,
-            ..Default::default()
+    if inc_m {
+        for b in &built.main {
+            let mut br = to_brick(s.paint(if b.pillar { 3 } else { 0 }), b);
+            br.position = Position::new(b.pos.0 - c.0, b.pos.1 - c.1, b.pos.2 - c.2);
+            w.add_brick(br);
         }
-        .with_component(LiteralComponent::new("Component_Internal_RigidBearing").with_data([
-            ("TargetAngle", Box::new(g.angle as f32) as Box<dyn AsBrdbValue>),
-            ("bAnglesArePercentages", Box::new(false)),
-            ("bReversed", Box::new(false)),
-            ("CurrentAngle", Box::new(g.angle as f32)),
-            ("InterpMode", Box::new(2u8)),
-            ("SmoothTime", Box::new(0.25f32)),
-            ("TopSpeed", Box::new(0.0f32)),
-        ]))
-        .with_id_split();
-        w.add_brick(bearing);
+    }
+    let parts = entity_parts(built);
+    let bp = s.paint(4);
+    for (gi, g) in built.entities.iter().enumerate() {
+        let mut bearing_id = None;
+        if inc_b {
+            let (bearing, id) = Brick {
+                asset: BrickType::Basic(brdb::BString::str(BEARING)),
+                position: Position::new(g.bearing.0 - c.0, g.bearing.1 - c.1, g.bearing.2 - c.2),
+                direction: if upside { Direction::ZNegative } else { Direction::ZPositive },
+                rotation: Rotation::Deg0,
+                color: (bp.color[0], bp.color[1], bp.color[2]).into(),
+                material: brdb::BString::from(MATERIALS[bp.material].1.to_string()),
+                material_intensity: bp.intensity,
+                ..Default::default()
+            }
+            .with_component(LiteralComponent::new("Component_Internal_RigidBearing").with_data([
+                ("TargetAngle", Box::new(g.angle as f32) as Box<dyn AsBrdbValue>),
+                ("bAnglesArePercentages", Box::new(false)),
+                ("bReversed", Box::new(false)),
+                ("CurrentAngle", Box::new(g.angle as f32)),
+                ("InterpMode", Box::new(2u8)),
+                ("SmoothTime", Box::new(0.25f32)),
+                ("TopSpeed", Box::new(0.0f32)),
+            ]))
+            .with_id_split();
+            w.add_brick(bearing);
+            bearing_id = Some(id);
+        }
+        if !inc_e {
+            continue;
+        }
+        let paint = s.paint(parts[gi]);
         let id = Brick::next_id();
         w.add_brick_grid(
             Entity {
@@ -867,9 +1104,11 @@ pub fn to_world(s: &Settings, built: &Built) -> World {
                 rotation: ent_quat(g.yaw.unwrap(), upside),
                 ..Default::default()
             },
-            g.bricks.iter().map(|b| to_brick(s, b)),
+            g.bricks.iter().map(|b| to_brick(paint, b)),
         );
-        w.add_joint(bearing_id, id, Vector3f::default(), Quat4f { x: 0.0, y: 0.0, z: 0.0, w: 1.0 });
+        if let Some(bid) = bearing_id {
+            w.add_joint(bid, id, Vector3f::default(), Quat4f { x: 0.0, y: 0.0, z: 0.0, w: 1.0 });
+        }
     }
     w.meta.bundle.name = s.name.clone();
     w.meta.bundle.description = format!("Made with BRZ Pattern Generator v{VERSION}");
@@ -891,6 +1130,9 @@ pub fn to_world(s: &Settings, built: &Built) -> World {
 }
 
 pub fn to_brz_bytes(s: &Settings) -> Result<(Built, Vec<u8>), String> {
+    if !(s.include_main || s.include_entities || s.include_bearings) {
+        return Err("Nothing to save: tick at least one of Main grid, Entities, Bearings".into());
+    }
     let built = build(s)?;
     let w = to_world(s, &built);
     let bytes = w.to_brz_vec().map_err(|e| e.to_string())?;
@@ -969,6 +1211,7 @@ impl Settings {
             ("style", e(&self.style)),
             ("wall_height", self.wall_height.to_string()),
             ("wall_thickness", self.wall_thickness.to_string()),
+            ("wedge_thickness", self.wedge_thickness.to_string()),
             ("flip_wedges", self.flip_wedges.to_string()),
             ("spokes", e(&self.spokes)),
             ("spoke_dirs", format!("{},{},{}", self.spoke_dirs[0], self.spoke_dirs[1], self.spoke_dirs[2])),
@@ -991,6 +1234,10 @@ impl Settings {
             ("color", format!("{},{},{}", self.color[0], self.color[1], self.color[2])),
             ("material", self.material.to_string()),
             ("intensity", self.intensity.to_string()),
+            ("one_paint", self.one_paint.to_string()),
+            ("paints", self.paints.iter().map(|p| format!("{},{},{},{},{}", p.color[0], p.color[1], p.color[2], p.material, p.intensity)).collect::<Vec<_>>().join(";")),
+            ("posts_centred", self.posts_centred.to_string()),
+            ("include", format!("{},{},{}", self.include_main, self.include_entities, self.include_bearings)),
         ];
         lines.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
     }
@@ -1012,6 +1259,7 @@ impl Settings {
                 "style" => s.style = if v == "MicroBrick" { WallStyle::MicroBrick } else { WallStyle::MicroWedge },
                 "wall_height" => if let Some(x) = i() { s.wall_height = x },
                 "wall_thickness" => if let Some(x) = i() { s.wall_thickness = x },
+                "wedge_thickness" => if let Some(x) = i() { s.wedge_thickness = x },
                 "flip_wedges" => if let Some(x) = b() { s.flip_wedges = x },
                 "spokes" => s.spokes = match v { "None" => SpokeMode::None, "EveryCell" => SpokeMode::EveryCell, "AltRows" => SpokeMode::AltRows, _ => SpokeMode::Custom },
                 "spoke_dirs" => {
@@ -1040,6 +1288,20 @@ impl Settings {
                 }
                 "material" => if let Some(x) = v.parse::<usize>().ok() { s.material = x.min(MATERIALS.len() - 1) },
                 "intensity" => if let Some(x) = v.parse::<u8>().ok() { s.intensity = x.min(10) },
+                "one_paint" => if let Some(x) = b() { s.one_paint = x },
+                "posts_centred" => if let Some(x) = b() { s.posts_centred = x },
+                "paints" => {
+                    for (i, part) in v.split(';').enumerate().take(5) {
+                        let n: Vec<usize> = part.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                        if n.len() == 5 {
+                            s.paints[i] = Paint { color: [n[0].min(255) as u8, n[1].min(255) as u8, n[2].min(255) as u8], material: n[3].min(MATERIALS.len() - 1), intensity: n[4].min(10) as u8 };
+                        }
+                    }
+                }
+                "include" => {
+                    let p: Vec<bool> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if p.len() == 3 { s.include_main = p[0]; s.include_entities = p[1]; s.include_bearings = p[2]; }
+                }
                 _ => {}
             }
         }

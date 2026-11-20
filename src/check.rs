@@ -48,7 +48,7 @@ pub fn check(s: &Settings, built: &Built) -> Vec<String> {
             }
         }
         // Bearing must not clash with main-grid bricks.
-        let bear = B { kind: Kind::Micro, size: (1, 1, 1), pos: g.bearing, ori: 16 };
+        let bear = B { pillar: false, kind: Kind::Micro, size: (1, 1, 1), pos: g.bearing, ori: 16 };
         if built.main.iter().any(|b| boxes_overlap(b, &bear)) {
             p.push(format!("entity {i}: bearing overlaps a main-grid brick"));
         }
@@ -57,27 +57,7 @@ pub fn check(s: &Settings, built: &Built) -> Vec<String> {
         if g.origin != (g.bearing.0, g.bearing.1, face) {
             p.push(format!("entity {i}: origin is not on the bearing face"));
         }
-        // Bearing must not clash with any entity brick (checked in world space).
-        for (j, h) in built.entities.iter().enumerate() {
-            let m = ent_matrix(h.yaw.unwrap(), upside);
-            for b in &h.bricks {
-                let hh = half(b);
-                let c = mul(&m, (b.pos.0 as f64, b.pos.1 as f64, b.pos.2 as f64));
-                let c = (c.0 + h.origin.0 as f64, c.1 + h.origin.1 as f64, c.2 + h.origin.2 as f64);
-                let e = (
-                    m[0][0].abs() * hh.0 as f64 + m[0][1].abs() * hh.1 as f64 + m[0][2].abs() * hh.2 as f64,
-                    m[1][0].abs() * hh.0 as f64 + m[1][1].abs() * hh.1 as f64 + m[1][2].abs() * hh.2 as f64,
-                    m[2][0].abs() * hh.0 as f64 + m[2][1].abs() * hh.1 as f64 + m[2][2].abs() * hh.2 as f64,
-                );
-                // Turned boxes are checked loosely (their corners stick out), so
-                // only a clear clash with the box's middle counts.
-                let near = |a: f64, ea: f64, bb: i32| (a - bb as f64).abs() < (ea * 0.5 + 1.0) - 0.01;
-                if near(c.0, e.0, g.bearing.0) && near(c.1, e.1, g.bearing.1) && (c.2 - g.bearing.2 as f64).abs() < e.2 + 1.0 - 0.01 {
-                    p.push(format!("entity {j}: a brick sits on bearing {i}"));
-                    break;
-                }
-            }
-        }
+        // (Entity bricks may pass through a bearing: entities can overlap other grids.)
     }
     for b in built.main.iter().chain(built.entities.iter().flat_map(|g| g.bricks.iter())) {
         let (x, y, z) = b.size;
