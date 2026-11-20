@@ -1,0 +1,26 @@
+[package]
+name = "brz-pattern-generator"
+version = "0.1.0"
+edition = "2021"
+description = "Angled brick patterns for Brickadia, held on rigid bearings, saved as prefabs"
+license = "MIT"
+
+[lib]
+name = "patterngen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "selftest"
+path = "src/bin/selftest.rs"
+
+[[bin]]
+name = "testpack"
+path = "src/bin/testpack.rs"
+
+[dependencies]
+brdb = "1.0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
