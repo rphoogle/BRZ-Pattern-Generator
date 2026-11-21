@@ -10,18 +10,17 @@ fn main() {
     paints[3].color = [0xFF, 0xC8, 0x57];
     paints[3].material = 4;
     paints[3].intensity = 8;
+    let euro = |c: [u8; 3], m: usize| Paint { color: c, material: m, intensity: if m == 4 { 4 } else { 0 } };
     let tests: Vec<(&str, Settings)> = vec![
-        ("V01_Triangles", Settings { pattern: Pattern::Triangles, ..d.clone() }),
-        ("V02_Star_Of_David_Spokes", Settings { pattern: Pattern::Stars, ..d.clone() }),
-        ("V03_Cube_Illusion", Settings { pattern: Pattern::Cubes, spokes: SpokeMode::None, ..d.clone() }),
-        ("V04_Octagons_Squares_Spokes_Every_Cell", Settings { pattern: Pattern::Octagons, spokes: SpokeMode::EveryCell, ..d.clone() }),
-        ("V05_Diamonds", Settings { pattern: Pattern::Diamonds, ..d.clone() }),
-        ("V06_Triangles_Brick_Walls_90", Settings { pattern: Pattern::Triangles, style: WallStyle::MicroBrick, wall_thickness: 4, turn: Turn::WallsAcross, ..d.clone() }),
-        ("V07_Stars_Upside_Down_Pillars", Settings { pattern: Pattern::Stars, way_up: WayUp::UpsideDown, corner_posts: 4, posts_extra: 4, ..d.clone() }),
-        ("V08_Octagons_90_Upside_Down_Square_Pillars", Settings { pattern: Pattern::Octagons, turn: Turn::WallsAcross, way_up: WayUp::UpsideDown, corner_posts: 4, posts_round: false, cell: 30, ..d.clone() }),
-        ("V09_Cubes_Colours_Each_Part", Settings { pattern: Pattern::Cubes, one_paint: false, paints, corner_posts: 4, spokes: SpokeMode::None, ..d.clone() }),
-        ("V10_Diamonds_Wide_Pillars", Settings { pattern: Pattern::Diamonds, corner_posts: 16, ..d.clone() }),
-        ("V11_Honeycomb_Unchanged", d.clone()),
+        ("W01_Hidden_Bearings", d.clone()),
+        ("W02_Visible_Bearings", Settings { hide_bearings: false, ..d.clone() }),
+        ("W03_Honeycomb_Main_Walls_On_Entity_Pillars", Settings { main_on_entity: true, corner_posts: 4, ..d.clone() }),
+        ("W04_Octagons_Main_Walls_On_Entity_Pillars", Settings { pattern: Pattern::Octagons, main_on_entity: true, corner_posts: 4, spokes: SpokeMode::None, ..d.clone() }),
+        ("W05_Honeycomb_Thick_Brick_Walls_8M", Settings { style: WallStyle::MicroBrick, wall_thickness: 16, spokes: SpokeMode::None, ..d.clone() }),
+        ("W06_Triangles_Thick_Wedge_Walls_12M", Settings { pattern: Pattern::Triangles, wedge_thickness: 24, ..d.clone() }),
+        ("W07_Octagons_Thick_Brick_Walls_8M", Settings { pattern: Pattern::Octagons, style: WallStyle::MicroBrick, wall_thickness: 16, spokes: SpokeMode::None, ..d.clone() }),
+        ("W08_Max_Area_Far_Bricks", Settings { pattern: Pattern::Triangles, width: 4000, length: 4000, cell: 40, ..d.clone() }),
+        ("W09_Eurotown_Palette_Colours", Settings { pattern: Pattern::Stars, one_paint: false, paints: [euro([166, 64, 53], 0), euro([139, 125, 105], 0), euro([28, 71, 255], 0), euro([198, 195, 168], 4), euro([255, 255, 255], 0)], corner_posts: 4, ..d.clone() }),
     ];
     std::fs::create_dir_all("testpack").unwrap();
     for (name, mut s) in tests {

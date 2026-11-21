@@ -3,7 +3,7 @@
 
 use crate::*;
 
-fn boxes_overlap(a: &B, b: &B) -> bool {
+pub(crate) fn boxes_overlap(a: &B, b: &B) -> bool {
     let (ha, hb) = (half(a), half(b));
     let ov = |pa: i32, ea: i32, pb: i32, eb: i32| (pa + ea).min(pb + eb) - (pa - ea).max(pb - eb) > 0;
     ov(a.pos.0, ha.0, b.pos.0, hb.0) && ov(a.pos.1, ha.1, b.pos.1, hb.1) && ov(a.pos.2, ha.2, b.pos.2, hb.2)
@@ -41,12 +41,6 @@ pub fn check(s: &Settings, built: &Built) -> Vec<String> {
         if o > 0 {
             p.push(format!("entity {i}: {o} overlapping brick pairs"));
         }
-        for b in &g.bricks {
-            if [b.pos.0, b.pos.1, b.pos.2].iter().any(|v| v.abs() > 1000) {
-                p.push(format!("entity {i}: brick too far from its bearing"));
-                break;
-            }
-        }
         // Bearing must not clash with main-grid bricks.
         let bear = B { pillar: false, kind: Kind::Micro, size: (1, 1, 1), pos: g.bearing, ori: 16 };
         if built.main.iter().any(|b| boxes_overlap(b, &bear)) {
@@ -70,6 +64,22 @@ pub fn check(s: &Settings, built: &Built) -> Vec<String> {
         p.push(format!("rounding moved a piece {:.2} units", built.max_move));
     }
     p
+}
+
+/// Things worth knowing that don't stop a save.
+pub fn warnings(s: &Settings, built: &Built) -> Vec<String> {
+    let mut w = Vec::new();
+    let far = built.entities.iter().any(|g| g.bricks.iter().any(|b| [b.pos.0, b.pos.1].iter().any(|v| v.abs() > 1000)));
+    if far {
+        w.push("Some entity bricks are over 100 studs from their bearing. This is fine; just noting it.".into());
+    }
+    if built.layers > 0 {
+        w.push(format!("Walls this thick overlap, so {} extra entit{} at the same angles hold the overlapping parts.", built.layers, if built.layers == 1 { "y" } else { "ies" }));
+    }
+    if s.include_entities && !s.include_bearings {
+        w.push("Entities without bearings will paste frozen and won't be held at their angle if unfrozen.".into());
+    }
+    w
 }
 
 /// Write the prefab to memory and read it back with brdb, checking counts.

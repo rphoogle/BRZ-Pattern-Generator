@@ -126,6 +126,10 @@ pub struct Settings {
     pub include_main: bool,
     pub include_entities: bool,
     pub include_bearings: bool,
+    /// Bearings invisible and without collision (they still hold their entity).
+    pub hide_bearings: bool,
+    /// Put the main-grid walls on their own 0° entity too (so they can run through pillars).
+    pub main_on_entity: bool,
 }
 
 impl Settings {
@@ -171,15 +175,17 @@ impl Default for Settings {
             walls_through: true,
             posts_extra: 0,
             best_bearings: true,
-            color: [0xDB, 0xBE, 0xC0],
+            color: [0xFF, 0xFF, 0xFF],
             material: 0,
             intensity: 0,
             one_paint: true,
-            paints: [Paint { color: [0xDB, 0xBE, 0xC0], material: 0, intensity: 0 }; 5],
+            paints: [Paint { color: [0xFF, 0xFF, 0xFF], material: 0, intensity: 0 }; 5],
             posts_centred: true,
             include_main: true,
             include_entities: true,
             include_bearings: true,
+            hide_bearings: true,
+            main_on_entity: false,
         }
     }
 }
@@ -224,6 +230,8 @@ pub struct Grid {
     pub max_move: f64,
     /// This entity holds pillars (not walls).
     pub pillars: bool,
+    /// Which paint it uses: 0 main grid walls, 1 entity 1, 2 entity 2, 3 pillars.
+    pub part: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +246,8 @@ pub struct Built {
     pub corner_worst: f64,
     /// Pillars were too wide for the main grid: how many entities hold them (0 = on the main grid).
     pub posts_entity: usize,
+    /// Extra entities added so thick walls can overlap (0 = none needed).
+    pub layers: usize,
 }
 
 impl Built {
@@ -512,8 +522,8 @@ pub fn validate(s: &Settings) -> Result<(), String> {
         return Err("Wedge wall thickness must be a whole number of wedge pairs (2, 4, 6 ... micro)".into());
     }
     let thick = if s.style == WallStyle::MicroWedge { s.wedge_thickness } else { s.wall_thickness };
-    if thick * 2 > s.cell {
-        return Err("Walls are too thick for this cell size (at most half the cell)".into());
+    if thick > 2000 {
+        return Err("Walls are too thick for one brick".into());
     }
     if s.cell < 8 {
         return Err("Cell size must be at least 4 micro bricks".into());
@@ -540,10 +550,11 @@ pub fn build(s: &Settings) -> Result<Built, String> {
         // Stretch arrives in v0.3.1 (angles change, so pieces must be recut).
         return Err("Stretch is not available yet (coming in v0.3.1)".into());
     }
-    match s.pattern {
-        Pattern::Honeycomb => build_honeycomb(s),
-        _ => patterns::build_faces(s),
-    }
+    let built = match s.pattern {
+        Pattern::Honeycomb => build_honeycomb(s)?,
+        _ => patterns::build_faces(s)?,
+    };
+    layers::finish(s, built)
 }
 
 /// The honeycomb (its own code, as tested in game).
@@ -751,7 +762,8 @@ fn build_honeycomb(s: &Settings) -> Result<Built, String> {
         }
     }
     let stop_half = short_half.max(1);
-    let main_half = if s.corner_posts > 0 && (!posts_entity || !s.walls_through) { stop_half } else { full_half };
+    // Main-grid walls stop at pillars on the main grid, unless they move to their own entity and run through.
+    let main_half = if s.corner_posts > 0 && (!s.walls_through || (!posts_entity && !s.main_on_entity)) { stop_half } else { full_half };
     let ent_half = if s.corner_posts > 0 && !s.walls_through { stop_half } else { full_half };
 
     let mut main: Vec<B> = Vec::new();
@@ -994,7 +1006,7 @@ fn build_honeycomb(s: &Settings) -> Result<Built, String> {
         }
         max_move = max_move.max(mv);
         let angle = if upside { norm(yaw - 180.0) } else { norm(-yaw) };
-        entities.push(Grid { yaw: Some(yaw), bricks, origin, bearing: (bx, by, bz), angle, max_move: mv, pillars: false });
+        entities.push(Grid { yaw: Some(yaw), bricks, origin, bearing: (bx, by, bz), angle, max_move: mv, pillars: false, part: 0 });
     }
     for gi in 0..post_groups {
         // Pillars on their own entity at 0°: whole-unit positions, so no rounding.
@@ -1010,10 +1022,10 @@ fn build_honeycomb(s: &Settings) -> Result<Built, String> {
             })
             .collect();
         let angle = if upside { 180.0 } else { 0.0 };
-        entities.push(Grid { yaw: Some(0.0), bricks, origin, bearing: (bx, by, if upside { -1 } else { 1 }), angle, max_move: 0.0, pillars: true });
+        entities.push(Grid { yaw: Some(0.0), bricks, origin, bearing: (bx, by, if upside { -1 } else { 1 }), angle, max_move: 0.0, pillars: true, part: 3 });
     }
     let angles = (0..3).map(|k| norm(dirs[k]).rem_euclid(180.0)).collect();
-    Ok(Built { main, entities, cells, max_move, angles, corner_mean: mean_corner, corner_worst: worst_corner, posts_entity: post_groups })
+    Ok(Built { main, entities, cells, max_move, angles, corner_mean: mean_corner, corner_worst: worst_corner, posts_entity: post_groups, layers: 0 })
 }
 
 /// World-space bounding box of everything (entities as turned boxes).
@@ -1076,8 +1088,7 @@ fn to_brick(p: Paint, b: &B) -> Brick {
 /// Which paint each entity uses: wall entities take Entity 1, Entity 2 in
 /// order; pillar entities take Pillars.
 pub fn entity_parts(built: &Built) -> Vec<usize> {
-    let mut n = 0;
-    built.entities.iter().map(|g| if g.pillars { 3 } else { n += 1; n.min(2) }).collect()
+    built.entities.iter().map(|g| g.part).collect()
 }
 
 /// Build the prefab world: main grid, entities, bearings and joints, centred.
@@ -1110,6 +1121,12 @@ pub fn to_world(s: &Settings, built: &Built) -> World {
                 color: (bp.color[0], bp.color[1], bp.color[2]).into(),
                 material: brdb::BString::from(MATERIALS[bp.material].1.to_string()),
                 material_intensity: bp.intensity,
+                visible: !s.hide_bearings,
+                collision: if s.hide_bearings {
+                    brdb::Collision { player: false, player1: None, player2: None, player3: None, weapon: false, interact: false, tool: false, physics: false }
+                } else {
+                    Default::default()
+                },
                 ..Default::default()
             }
             .with_component(LiteralComponent::new("Component_Internal_RigidBearing").with_data([
@@ -1185,6 +1202,8 @@ pub fn write_brz(s: &Settings, path: &std::path::Path) -> Result<Built, String> 
 
 pub mod check;
 pub mod patterns;
+pub mod layers;
+pub mod palette;
 
 // ---------- preview footprints ----------
 
@@ -1230,11 +1249,42 @@ pub fn footprints(s: &Settings, built: &Built) -> Vec<Foot> {
                 let p = mul(&m, (b.pos.0 as f64 + sx * h.0 as f64, b.pos.1 as f64 + sy * h.1 as f64, 0.0));
                 pts[j] = (p.0 + g.origin.0 as f64, p.1 + g.origin.1 as f64);
             }
-            v.push(Foot { pts, grid: i + 1, kind: foot_kind(b) });
+            let _ = i;
+            v.push(Foot { pts, grid: g.part, kind: foot_kind(b) });
         }
         v.push(Foot { pts: rect(g.bearing.0 as f64, g.bearing.1 as f64, 1.0, 1.0), grid: 0, kind: FootKind::Bearing });
     }
     v
+}
+
+/// How high each kind of brick reaches (bottom, top in units, world z):
+/// walls, spokes, pillars, bearings. Used for the side view next to the preview.
+pub fn height_profile(s: &Settings, built: &Built) -> Vec<(FootKind, i32, i32)> {
+    let upside = s.way_up == WayUp::UpsideDown;
+    let mut out: Vec<(FootKind, i32, i32)> = Vec::new();
+    let mut add = |k: FootKind, z0: i32, z1: i32| {
+        if let Some(e) = out.iter_mut().find(|e| e.0 == k) {
+            e.1 = e.1.min(z0);
+            e.2 = e.2.max(z1);
+        } else {
+            out.push((k, z0, z1));
+        }
+    };
+    for b in &built.main {
+        let h = half(b);
+        add(foot_kind(b), b.pos.2 - h.2, b.pos.2 + h.2);
+    }
+    for g in &built.entities {
+        for b in &g.bricks {
+            let h = half(b);
+            let (z0, z1) = (b.pos.2 - h.2, b.pos.2 + h.2);
+            if upside { add(foot_kind(b), -z1, -z0) } else { add(foot_kind(b), z0, z1) }
+        }
+        add(FootKind::Bearing, g.bearing.2 - 1, g.bearing.2 + 1);
+    }
+    let order = |k: FootKind| match k { FootKind::Wall => 0, FootKind::Spoke => 1, FootKind::Pillar => 2, FootKind::Bearing => 3 };
+    out.sort_by_key(|e| order(e.0));
+    out
 }
 
 // ---------- settings as text (presets) ----------
@@ -1244,6 +1294,8 @@ impl Settings {
         let e = |x: &dyn std::fmt::Debug| format!("{x:?}");
         let lines = [
             ("pattern", e(&self.pattern)),
+            ("hide_bearings", self.hide_bearings.to_string()),
+            ("main_on_entity", self.main_on_entity.to_string()),
             ("cell", self.cell.to_string()),
             ("stretch_h", self.stretch_h.to_string()),
             ("stretch_v", self.stretch_v.to_string()),
@@ -1321,6 +1373,8 @@ impl Settings {
                 "corner_posts" => if let Some(x) = i() { s.corner_posts = x },
                 "posts_round" => if let Some(x) = b() { s.posts_round = x },
                 "walls_through" => if let Some(x) = b() { s.walls_through = x },
+                "hide_bearings" => if let Some(x) = b() { s.hide_bearings = x },
+                "main_on_entity" => if let Some(x) = b() { s.main_on_entity = x },
                 "posts_extra" => if let Some(x) = i() { s.posts_extra = x },
                 "best_bearings" => if let Some(x) = b() { s.best_bearings = x },
                 "color" => {

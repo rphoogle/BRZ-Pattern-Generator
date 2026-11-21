@@ -324,11 +324,6 @@ fn share_pillars(posts: &[(i32, i32)], ph: i32) -> (Vec<usize>, usize) {
 pub fn build_faces(s: &Settings) -> Result<Built, String> {
     let upside = s.way_up == WayUp::UpsideDown;
     let thick = if s.style == WallStyle::MicroWedge { s.wedge_thickness } else { s.wall_thickness };
-    let gap = min_gap(s.pattern) * s.cell as f64;
-    if thick as f64 > gap - 2.0 {
-        return Err(format!("Walls are too thick for this cell size (at most {} micro for this pattern)", ((gap - 2.0) / 2.0).floor().max(0.0)));
-    }
-
     // 1. Tiles inside the area.
     let all = faces(s);
     let kept: Vec<Face> = all.into_iter().filter(|fc| in_area(s, fc.c.0, fc.c.1)).collect();
@@ -573,7 +568,7 @@ pub fn build_faces(s: &Settings) -> Result<Built, String> {
     let post_lo = post_zc - post_hh;
     let post_hi = post_zc + post_hh;
     let cut_posts = |runs: Vec<Run>, half_w: i32, z0: i32, z1: i32| -> Vec<Run> {
-        if s.corner_posts == 0 || posts_entity || z1 <= post_lo || z0 >= post_hi {
+        if s.corner_posts == 0 || posts_entity || (s.main_on_entity && s.walls_through) || z1 <= post_lo || z0 >= post_hi {
             return runs;
         }
         let mut out = Vec::new();
@@ -701,7 +696,7 @@ pub fn build_faces(s: &Settings) -> Result<Built, String> {
     let ent_grids = ngrids - 1;
     let need = ent_grids + post_groups;
     let limit = (if s.best_bearings { (3_000_000 / meet.len().max(1)).clamp(150, 2500) } else { 50 }).max(need * 20);
-    let find_spots = |soft: bool| -> Vec<(i32, i32)> {
+    let find_spots = |soft: bool, area_only: bool| -> Vec<(i32, i32)> {
         let mut spots = Vec::new();
         'search: for rad in 0..300i32 {
             for dx in -rad..=rad {
@@ -711,7 +706,7 @@ pub fn build_faces(s: &Settings) -> Result<Built, String> {
                     }
                     let (bx, by) = (mx.round() as i32 + dx, my.round() as i32 + dy);
                     // Keep bearings inside the pattern's area, where the walls hide them.
-                    if in_area(s, bx as f64, by as f64) && free_with(soft, bx, by, &[]) {
+                    if (!area_only || in_area(s, bx as f64, by as f64)) && free_with(soft, bx, by, &[]) {
                         spots.push((bx, by));
                         if spots.len() >= limit {
                             break 'search;
@@ -723,10 +718,14 @@ pub fn build_faces(s: &Settings) -> Result<Built, String> {
         spots
     };
     let mut use_soft = true;
-    let mut spots = find_spots(true);
+    let mut spots = find_spots(true, true);
     if spots.len() < need * 10 {
         use_soft = false;
-        spots = find_spots(false);
+        spots = find_spots(false, true);
+    }
+    if spots.len() < need {
+        // Very thick walls can fill the whole area: look outside it too.
+        spots = find_spots(false, false);
     }
     let free = |bx: i32, by: i32, others: &[(i32, i32)]| free_with(use_soft, bx, by, others);
     if need > 0 && spots.is_empty() {
@@ -836,7 +835,7 @@ pub fn build_faces(s: &Settings) -> Result<Built, String> {
         }
         max_move = max_move.max(mv);
         let angle = if upside { norm(yaw - 180.0) } else { norm(-yaw) };
-        entities.push(Grid { yaw: Some(yaw), bricks, origin: (bx, by, 0), bearing: (bx, by, if upside { -1 } else { 1 }), angle, max_move: mv, pillars: false });
+        entities.push(Grid { yaw: Some(yaw), bricks, origin: (bx, by, 0), bearing: (bx, by, if upside { -1 } else { 1 }), angle, max_move: mv, pillars: false, part: 0 });
     }
     for gi in 0..post_groups {
         let (bx, by) = chosen[ent_grids + gi];
@@ -850,10 +849,10 @@ pub fn build_faces(s: &Settings) -> Result<Built, String> {
             })
             .collect();
         let angle = if upside { 180.0 } else { 0.0 };
-        entities.push(Grid { yaw: Some(0.0), bricks, origin: (bx, by, 0), bearing: (bx, by, if upside { -1 } else { 1 }), angle, max_move: 0.0, pillars: true });
+        entities.push(Grid { yaw: Some(0.0), bricks, origin: (bx, by, 0), bearing: (bx, by, if upside { -1 } else { 1 }), angle, max_move: 0.0, pillars: true, part: 3 });
     }
     let angles = grid_yaw.iter().map(|a| a.rem_euclid(180.0)).collect();
-    Ok(Built { main, entities, cells: kept.len(), max_move, angles, corner_mean, corner_worst, posts_entity: post_groups })
+    Ok(Built { main, entities, cells: kept.len(), max_move, angles, corner_mean, corner_worst, posts_entity: post_groups, layers: 0 })
 }
 
 /// Spoke directions this pattern can have (degrees, sorted). Spoke tick box

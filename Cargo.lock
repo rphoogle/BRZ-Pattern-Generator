@@ -533,13 +533,14 @@ dependencies = [
 
 [[package]]
 name = "brz-pattern-generator"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "brdb",
  "clipboard-win",
  "dirs",
  "eframe",
  "egui",
+ "serde_json",
 ]
 
 [[package]]

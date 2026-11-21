@@ -75,6 +75,9 @@ struct App {
     cards_h: f32,
     real_colours: bool,
     part_hex: [String; 5],
+    // colour palettes (the game's .bp files)
+    palettes: Vec<(String, std::path::PathBuf)>,
+    palette: Option<palette::Palette>,
 }
 
 impl App {
@@ -108,8 +111,19 @@ impl App {
             cards_h: 190.0,
             real_colours: false,
             part_hex: std::array::from_fn(|_| hex_of(Settings::default().color)),
+            palettes: Vec::new(),
+            palette: None,
         };
         a.refresh_presets();
+        a.refresh_palettes();
+        // The palette used last time.
+        if let Some(f) = Self::palette_memory() {
+            if let Ok(p) = std::fs::read_to_string(&f) {
+                if let Ok(pal) = palette::load(std::path::Path::new(p.trim())) {
+                    a.palette = Some(pal);
+                }
+            }
+        }
         a
     }
 
@@ -185,8 +199,8 @@ impl App {
             self.log(LogKind::Err, format!("Self-check failed ({}). Nothing was saved. Please send these settings to Claude.", probs.join("; ")));
             return None;
         }
-        if s.include_entities && !s.include_bearings {
-            self.log(LogKind::Warn, "Saved without bearings: the entities are frozen in place but nothing holds their angle if unfrozen.");
+        for w in check::warnings(&s, &built) {
+            self.log(LogKind::Warn, w);
         }
         let n = built.brick_count();
         let e = built.entities.len();
@@ -242,6 +256,41 @@ impl App {
     }
 
     // ---------------------------------------------------------------- presets
+
+    /// Where the game keeps colour palettes.
+    fn palette_dir() -> Option<std::path::PathBuf> {
+        dirs::data_local_dir().map(|d| d.join("Brickadia").join("Saved").join("Presets").join("ColorPalettes"))
+    }
+
+    fn palette_memory() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|d| d.join("BRZPatternGenerator").join("palette.txt"))
+    }
+
+    fn refresh_palettes(&mut self) {
+        self.palettes = Self::palette_dir().map(|d| palette::list(&d)).unwrap_or_default();
+    }
+
+    fn pick_palette(&mut self, path: Option<std::path::PathBuf>) {
+        match path {
+            None => {
+                self.palette = None;
+                if let Some(f) = Self::palette_memory() {
+                    let _ = std::fs::remove_file(f);
+                }
+            }
+            Some(p) => match palette::load(&p) {
+                Ok(pal) => {
+                    self.log(LogKind::Ok, format!("Palette \"{}\" loaded ({} groups).", pal.name, pal.groups.len()));
+                    self.palette = Some(pal);
+                    if let Some(f) = Self::palette_memory() {
+                        let _ = std::fs::create_dir_all(f.parent().unwrap());
+                        let _ = std::fs::write(f, p.to_string_lossy().as_bytes());
+                    }
+                }
+                Err(e) => self.log(LogKind::Err, format!("Couldn't read that palette: {e}")),
+            },
+        }
+    }
 
     fn preset_dir() -> Option<std::path::PathBuf> {
         dirs::config_dir().map(|d| d.join("BRZPatternGenerator").join("Presets"))
@@ -372,11 +421,38 @@ fn style_ui(ctx: &egui::Context) {
 
 /// Colour button + hex box, material, intensity.
 #[allow(clippy::too_many_arguments)]
-fn paint_rows(ui: &mut egui::Ui, lw: f32, name: &str, color: &mut [u8; 3], material: &mut usize, intensity: &mut u8, hex: &mut String, id: &str) {
+fn paint_rows(ui: &mut egui::Ui, lw: f32, name: &str, color: &mut [u8; 3], material: &mut usize, intensity: &mut u8, hex: &mut String, id: &str, pal: Option<&palette::Palette>) {
     ui.horizontal(|ui| {
         label(ui, name, lw);
         if egui::color_picker::color_edit_button_srgb(ui, color).changed() {
             *hex = hex_of(*color);
+        }
+        if let Some(pal) = pal {
+            // Swatches laid out like the game: one column per group.
+            ui.menu_button("Palette", |ui| {
+                ui.horizontal_top(|ui| {
+                    for g in &pal.groups {
+                        ui.vertical(|ui| {
+                            ui.set_width(24.0);
+                            let short: String = g.name.chars().take(4).collect();
+                            ui.label(RichText::new(short).size(10.0).color(SOFT)).on_hover_text(&g.name);
+                            for c in &g.colors {
+                                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::click());
+                                let on = *c == *color;
+                                ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(c[0], c[1], c[2]));
+                                if on || resp.hovered() {
+                                    ui.painter().rect_stroke(rect, 3.0, Stroke::new(2.0_f32, if on { ACCENT } else { Color32::WHITE }), egui::StrokeKind::Outside);
+                                }
+                                if resp.on_hover_text(format!("{} · #{}", g.name, hex_of(*c))).clicked() {
+                                    *color = *c;
+                                    *hex = hex_of(*c);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                });
+            });
         }
         if ui.add_sized([80.0, 22.0], egui::TextEdit::singleline(hex)).changed() {
             let h = hex.trim().trim_start_matches('#');
@@ -685,8 +761,8 @@ impl App {
             note(ui, lw + 8.0, patterns::cell_meaning(self.s.pattern));
             let mut sh = self.s.stretch_h as i32;
             let mut sv = self.s.stretch_v as i32;
-            int_row(ui, "Stretch H", lw, &mut sh, 25, 400, "%  (coming in v0.3.1)", false);
-            int_row(ui, "Stretch V", lw, &mut sv, 25, 400, "%  (coming in v0.3.1)", false);
+            int_row(ui, "Stretch H", lw, &mut sh, 25, 400, "%  (coming in v0.3.2)", false);
+            int_row(ui, "Stretch V", lw, &mut sv, 25, 400, "%  (coming in v0.3.2)", false);
             let ents = match &self.built {
                 Some(Ok((b, _))) => b.entities.len() - b.posts_entity,
                 _ => 2,
@@ -712,15 +788,20 @@ impl App {
             if brick {
                 let mut t = self.s.wall_thickness / 2;
                 let n = self.unit_note(t);
-                if size_row(ui, "Thickness", lw, &mut t, 1, 10, 50, u, &n, true) {
+                if size_row(ui, "Thickness", lw, &mut t, 1, 10, 1000, u, &n, true) {
                     self.s.wall_thickness = t * 2;
                 }
             } else {
                 // two wedges side by side, each a whole micro brick: steps of 2 M
                 let mut t = self.s.wedge_thickness / 2;
                 let n = format!("{} · pair of wedges", self.unit_note(t));
-                if size_row(ui, "Thickness", lw, &mut t, 2, 12, 50, u, &n, true) {
+                if size_row(ui, "Thickness", lw, &mut t, 2, 12, 1000, u, &n, true) {
                     self.s.wedge_thickness = ((t + 1) / 2 * 2).max(2) * 2;
+                }
+            }
+            if let Some(Ok((b, _))) = &self.built {
+                if b.layers > 0 {
+                    note(ui, lw + 8.0, format!("Walls this thick overlap: +{} entit{} at the same angles hold the overlaps", b.layers, if b.layers == 1 { "y" } else { "ies" }));
                 }
             }
             ui.add_enabled_ui(!brick, |ui| {
@@ -774,14 +855,56 @@ impl App {
                     label(ui, "Walls", lw);
                     seg(ui, &mut self.s.walls_through, &[(true, "Run through"), (false, "Stop at pillar")]);
                 });
+                ui.horizontal(|ui| {
+                    label(ui, "", lw);
+                    ui.checkbox(&mut self.s.main_on_entity, "Main grid walls on their own entity too");
+                });
+                note(ui, lw + 8.0, if self.s.main_on_entity { "Main walls sit on a 0° entity (+1 bearing), so they can run through pillars." } else { "Main grid walls stop at pillars (bricks on one grid can't overlap)." });
             });
             ui.separator();
+            ui.horizontal(|ui| {
+                label(ui, "Bearings", lw);
+                seg(ui, &mut self.s.hide_bearings, &[(true, "Hidden"), (false, "Visible")]);
+            });
+            note(ui, lw + 8.0, if self.s.hide_bearings { "Invisible, no collision. They still hold their entities." } else { "Visible, with normal collision." });
+            ui.separator();
+            ui.horizontal(|ui| {
+                label(ui, "Palette", lw);
+                let current = self.palette.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "None".into());
+                let mut pick: Option<Option<std::path::PathBuf>> = None;
+                egui::ComboBox::from_id_salt("palette").width(170.0).selected_text(current).show_ui(ui, |ui| {
+                    if ui.selectable_label(self.palette.is_none(), "None").clicked() {
+                        pick = Some(None);
+                    }
+                    for (n, p) in &self.palettes {
+                        let on = self.palette.as_ref().map(|x| &x.name == n).unwrap_or(false);
+                        if ui.selectable_label(on, n).clicked() {
+                            pick = Some(Some(p.clone()));
+                        }
+                    }
+                });
+                if let Some(p) = pick {
+                    self.pick_palette(p);
+                }
+                if ui.button("Refresh").on_hover_text("Look for new palettes in the game's palette folder").clicked() {
+                    self.refresh_palettes();
+                }
+                #[cfg(windows)]
+                if ui.button("Open folder").clicked() {
+                    if let Some(d) = Self::palette_dir() {
+                        let _ = std::process::Command::new("explorer").arg(d).spawn();
+                    }
+                }
+            });
+            if self.palettes.is_empty() {
+                note(ui, lw + 8.0, "No palettes found in AppData\\Local\\Brickadia\\Saved\\Presets\\ColorPalettes");
+            }
             ui.horizontal(|ui| {
                 label(ui, "Colours", lw);
                 seg(ui, &mut self.s.one_paint, &[(true, "Same for all"), (false, "Each part")]);
             });
             if self.s.one_paint {
-                paint_rows(ui, lw, "Colour", &mut self.s.color, &mut self.s.material, &mut self.s.intensity, &mut self.hex, "all");
+                paint_rows(ui, lw, "Colour", &mut self.s.color, &mut self.s.material, &mut self.s.intensity, &mut self.hex, "all", self.palette.as_ref());
             } else {
                 let (main_a, ent_a) = patterns::pattern_angles(self.s.pattern, self.s.turn == Turn::WallsAcross);
                 let ea = |i: usize| ent_a.get(i).map(|a| format!("{}°", fmt_num(*a))).unwrap_or_default();
@@ -792,7 +915,7 @@ impl App {
                     }
                     let p = &mut self.s.paints[i];
                     ui.label(bold(&names[i], 12.5).color(SOFT));
-                    paint_rows(ui, lw, "Colour", &mut p.color, &mut p.material, &mut p.intensity, &mut self.part_hex[i], &format!("p{i}"));
+                    paint_rows(ui, lw, "Colour", &mut p.color, &mut p.material, &mut p.intensity, &mut self.part_hex[i], &format!("p{i}"), self.palette.as_ref());
                 }
             }
         });
@@ -935,15 +1058,54 @@ impl App {
                 painter.rect_filled(egui::Rect::from_min_size(Pos2::new(lx, r.top() + 14.0), Vec2::splat(10.0)), 2.0, *c);
                 lx -= 12.0;
             }
+            // Side view strip on the right (heights can't be seen from above).
+            let side_w = 86.0;
+            let side = egui::Rect::from_min_max(Pos2::new(r.right() - side_w, r.top() + 30.0), Pos2::new(r.right() - 8.0, r.bottom() - 10.0));
+            if let Some(Ok((b, _))) = &self.built {
+                let prof = height_profile(&self.built_settings, b);
+                if !prof.is_empty() {
+                    painter.line_segment([Pos2::new(side.left() - 6.0, r.top() + 34.0), Pos2::new(side.left() - 6.0, r.bottom() - 10.0)], Stroke::new(1.0_f32, Color32::from_rgb(0x26, 0x35, 0x4f)));
+                    painter.text(Pos2::new(side.center().x, side.top() + 6.0), egui::Align2::CENTER_TOP, "SIDE VIEW", egui::FontId::proportional(10.5), Color32::from_rgb(0x8f, 0xa2, 0xc2));
+                    let zmin = prof.iter().map(|e| e.1).min().unwrap().min(0);
+                    let zmax = prof.iter().map(|e| e.2).max().unwrap().max(0);
+                    let total = (zmax - zmin) as f64 / 2.0;
+                    painter.text(Pos2::new(side.center().x, side.top() + 20.0), egui::Align2::CENTER_TOP, format!("{} M tall", fmt_num(total)), egui::FontId::proportional(11.0), Color32::WHITE);
+                    let plot = egui::Rect::from_min_max(Pos2::new(side.left() + 4.0, side.top() + 44.0), Pos2::new(side.right() - 4.0, side.bottom() - 40.0));
+                    let zs = plot.height() / (zmax - zmin).max(1) as f32;
+                    let zy = |z: i32| plot.bottom() - (z - zmin) as f32 * zs;
+                    // ground / mounting level
+                    painter.line_segment([Pos2::new(plot.left() - 2.0, zy(0)), Pos2::new(plot.right() + 2.0, zy(0))], Stroke::new(1.0_f32, Color32::from_rgb(0x55, 0x66, 0x88)));
+                    let n = prof.len() as f32;
+                    let cw = plot.width() / n;
+                    for (i, (k, z0, z1)) in prof.iter().enumerate() {
+                        let (col, tag, name) = match k {
+                            FootKind::Wall => (GRID_COL[0], "W", "Walls"),
+                            FootKind::Spoke => (SPOKE_COL[0], "S", "Spokes"),
+                            FootKind::Pillar => (PILLAR_COL, "P", "Pillars"),
+                            FootKind::Bearing => (BEARING_COL, "B", "Bearings"),
+                        };
+                        let x0 = plot.left() + i as f32 * cw + 2.0;
+                        let bar = egui::Rect::from_min_max(Pos2::new(x0, zy(*z1)), Pos2::new(x0 + cw - 4.0, zy(*z0).max(zy(*z1) + 2.0)));
+                        painter.rect_filled(bar, 2.0, col);
+                        painter.text(Pos2::new(bar.center().x, plot.bottom() + 5.0), egui::Align2::CENTER_TOP, tag, egui::FontId::proportional(10.5), Color32::from_rgb(0xa9, 0xb8, 0xd3));
+                        if ui.rect_contains_pointer(bar) {
+                            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("sidetip"), egui::PopupAnchor::Pointer).show(|ui| {
+                                ui.label(format!("{name}: {} M to {} M", fmt_num(*z0 as f64 / 2.0), fmt_num(*z1 as f64 / 2.0)));
+                            });
+                        }
+                    }
+                    painter.text(Pos2::new(side.center().x, side.bottom()), egui::Align2::CENTER_BOTTOM, "hover for heights", egui::FontId::proportional(9.5), NOTE);
+                }
+            }
+            let r = egui::Rect::from_min_max(r.min, Pos2::new(r.right() - side_w - 8.0, r.max.y));
             let painter = painter.with_clip_rect(r.shrink(2.0));
             let real = self.real_colours;
             let bs = self.built_settings.clone();
-            let eparts = match &self.built { Some(Ok((b, _))) => entity_parts(b), _ => Vec::new() };
             let paint_col = |grid: usize, k: FootKind| -> Color32 {
                 let part = match k {
                     FootKind::Pillar => 3,
                     FootKind::Bearing => 4,
-                    _ => if grid == 0 { 0 } else { *eparts.get(grid - 1).unwrap_or(&1) },
+                    _ => grid.min(3),
                 };
                 let c = bs.paint(part).color;
                 let col = Color32::from_rgb(c[0], c[1], c[2]);
